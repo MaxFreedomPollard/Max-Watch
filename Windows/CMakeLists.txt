@@ -49,6 +49,7 @@ if(MSVC)
         $<$<CONFIG:Release>:/O2 /guard:cf /Gy /Gw>
     )
     target_link_options(MaxWatch PRIVATE
+        /MANIFEST:NO
         /DYNAMICBASE
         /HIGHENTROPYVA
         /NXCOMPAT
