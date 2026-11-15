@@ -207,6 +207,13 @@ public:
 
     std::vector<uint8_t> readPlaintextRange(int64_t offset, size_t length);
 
+    // Lazily synthesizes a standard unfragmented ISO-BMFF MP4 index (`ftyp + moov + co64`) in RAM
+    // over the encrypted `mdat` chunks (zero temp files on disk) for frame-accurate seeking, duration, and export.
+    void ensureStandardMp4Layout();
+    int64_t standardMp4Length();
+    double standardMp4DurationSeconds();
+    std::vector<uint8_t> readStandardMp4Range(int64_t virtualOffset, size_t length);
+
     static std::vector<uint8_t> preadExactStatic(
 #ifdef _WIN32
         void* handle,
@@ -246,6 +253,15 @@ private:
     std::map<uint64_t, std::vector<uint8_t>> decryptedCache_;
     std::vector<uint64_t> cacheOrder_;
     static constexpr size_t kMaxCachedChunks = 28;
+
+    std::mutex mp4LayoutMutex_;
+    bool mp4LayoutInitialized_ = false;
+    bool mp4LayoutValid_ = false;
+    std::vector<uint8_t> mp4SynthHeader_;
+    uint64_t mp4OrigInitLen_ = 0;
+    uint64_t mp4MediaLen_ = 0;
+    double mp4ExactDurationSec_ = 0.0;
+    std::vector<uint64_t> mp4FreeOffsets_;
 };
 
 class VaultManager {

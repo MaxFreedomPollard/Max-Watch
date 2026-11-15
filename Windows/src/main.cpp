@@ -24,15 +24,20 @@
 namespace {
 
 void bindWin32StdHandlesForCli() {
-    auto bindOne = [](DWORD stdHandleId, FILE* targetStream, int targetFd, const char* conFile) {
+    auto bindOne = [](DWORD stdHandleId, FILE* targetStream, const char* conFile) {
         HANDLE h = GetStdHandle(stdHandleId);
         DWORD ftype = (h && h != INVALID_HANDLE_VALUE) ? GetFileType(h) : FILE_TYPE_UNKNOWN;
         if (ftype == FILE_TYPE_PIPE || ftype == FILE_TYPE_DISK || ftype == FILE_TYPE_CHAR) {
+            FILE* nulDummy = nullptr;
+            freopen_s(&nulDummy, "nul", "w", targetStream);
             int osf = _open_osfhandle(reinterpret_cast<intptr_t>(h), _O_TEXT);
             if (osf != -1) {
-                _dup2(osf, targetFd);
-                setvbuf(targetStream, nullptr, _IONBF, 0);
-                return;
+                FILE* wrapped = _fdopen(osf, "w");
+                if (wrapped) {
+                    _dup2(_fileno(wrapped), _fileno(targetStream));
+                    setvbuf(targetStream, nullptr, _IONBF, 0);
+                    return;
+                }
             }
         }
         if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -42,8 +47,12 @@ void bindWin32StdHandlesForCli() {
         }
     };
 
-    bindOne(STD_OUTPUT_HANDLE, stdout, 1, "CONOUT$");
-    bindOne(STD_ERROR_HANDLE, stderr, 2, "CONOUT$");
+    bindOne(STD_OUTPUT_HANDLE, stdout, "CONOUT$");
+    bindOne(STD_ERROR_HANDLE, stderr, "CONOUT$");
+    std::cout.clear();
+    std::cerr.clear();
+    std::wcout.clear();
+    std::wcerr.clear();
     std::ios::sync_with_stdio(true);
 }
 

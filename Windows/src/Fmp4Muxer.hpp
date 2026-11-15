@@ -106,4 +106,35 @@ private:
     std::vector<PendingAudioSample> pendingAudio_;
 };
 
+// Represents an in-RAM, zero-temp-file standard unfragmented ISO-BMFF MP4 index (`ftyp + moov`)
+// whose `co64` chunk offsets point directly into the encrypted `mdat` payloads of `VaultClipReader`.
+// Enables native frame-accurate `MF_PD_DURATION`, instant `stss` keyframe scrubbing via `SetCurrentPosition`,
+// >4 GB multi-hour playback without Windows `mfmp4srcsnk.dll` fragmented-MP4 limits, and faststart `.mp4` export.
+struct VirtualStandardMp4Layout {
+    bool valid = false;
+    std::vector<uint8_t> synthesizedHeader;      // Complete unfragmented `ftyp + moov`
+    uint64_t origInitPlaintextLen = 0;           // Byte offset where media fragments start in raw VaultClipReader plaintext
+    uint64_t mediaPlaintextLen = 0;              // Total byte length of all media fragments
+    double durationSeconds = 0.0;                // Exact presentation duration in seconds
+    std::vector<uint64_t> freeFourccMediaOffsets; // Offsets (relative to media start) where 4-byte 'free' replaces 'moof'/'sidx'
+
+    uint64_t totalVirtualSize() const {
+        return static_cast<uint64_t>(synthesizedHeader.size()) + mediaPlaintextLen;
+    }
+};
+
+VirtualStandardMp4Layout buildVirtualStandardMp4Layout(
+    const uint8_t* initBytes,
+    size_t initLen,
+    size_t mediaFragmentCount,
+    const std::function<std::vector<uint8_t>(size_t fragmentIndex)>& readMediaFragment
+);
+
+void applyFreeFourccPatchesToMediaSlice(
+    const VirtualStandardMp4Layout& layout,
+    uint64_t sliceMediaOffset,
+    uint8_t* buf,
+    size_t bufLen
+);
+
 } // namespace maxwatch

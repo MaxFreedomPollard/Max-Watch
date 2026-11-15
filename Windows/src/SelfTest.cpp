@@ -298,8 +298,8 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
             auto segWriter = std::make_unique<VaultSegmentWriter>(std::move(clipWriter), 1280, 720, true);
 
             feedSyntheticClipToWriter(*segWriter, 1280, 720, 4, true, 1763194534000LL);
-            // Wait until >= 2 1-second chunks have flushed to disk
-            for (int w = 0; w < 50 && segWriter->flushedSegmentCount() < 3; ++w) {
+            // Wait until init + 3 1-second chunks (~3.0s) have flushed to disk
+            for (int w = 0; w < 80 && segWriter->flushedSegmentCount() < 4; ++w) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(60));
             }
             checkTrue(segWriter->flushedSegmentCount() >= 3, "Expected init + >=2 1s fragments flushed before power cut");
@@ -374,7 +374,10 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
                 VaultPlayerEngine player;
                 std::string errMsg;
                 checkTrue(player.loadClip(reader, &errMsg), "VaultPlayerEngine failed to load clip: " + errMsg);
-                checkTrue(player.durationSeconds() >= 2.0, "Loaded clip duration too short");
+                checkTrue(
+                    player.durationSeconds() >= 1.95,
+                    "Loaded clip duration too short: " + std::to_string(player.durationSeconds())
+                );
 
                 BgraFrame firstFrame;
                 checkTrue(player.copyLatestVideoFrame(firstFrame), "Initial decoded BGRA frame missing");

@@ -243,6 +243,9 @@ class VaultMemoryByteStream final : public IMFByteStream, public IMFAttributes {
 public:
     explicit VaultMemoryByteStream(std::shared_ptr<VaultClipReader> reader)
         : refCount_(1), reader_(std::move(reader)), pos_(0) {
+        if (reader_) {
+            reader_->ensureStandardMp4Layout();
+        }
         MFCreateAttributes(&attrs_, 4);
         if (attrs_) {
             attrs_->SetString(MF_BYTESTREAM_CONTENT_TYPE, L"video/mp4");
@@ -286,7 +289,7 @@ public:
 
     STDMETHODIMP GetLength(QWORD* pqwLength) override {
         if (!pqwLength) return E_POINTER;
-        *pqwLength = static_cast<QWORD>(std::max<int64_t>(0, reader_->totalPlaintextLength()));
+        *pqwLength = static_cast<QWORD>(std::max<int64_t>(0, reader_->standardMp4Length()));
         return S_OK;
     }
 
@@ -301,7 +304,7 @@ public:
 
     STDMETHODIMP SetCurrentPosition(QWORD qwPosition) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        int64_t total = reader_->totalPlaintextLength();
+        int64_t total = reader_->standardMp4Length();
         pos_ = std::clamp<int64_t>(static_cast<int64_t>(qwPosition), 0, total);
         return S_OK;
     }
@@ -309,7 +312,7 @@ public:
     STDMETHODIMP IsEndOfStream(BOOL* pfEndOfStream) override {
         if (!pfEndOfStream) return E_POINTER;
         std::lock_guard<std::mutex> lock(mutex_);
-        *pfEndOfStream = (pos_ >= reader_->totalPlaintextLength()) ? TRUE : FALSE;
+        *pfEndOfStream = (pos_ >= reader_->standardMp4Length()) ? TRUE : FALSE;
         return S_OK;
     }
 
@@ -325,7 +328,7 @@ public:
         }
 
         try {
-            auto chunk = reader_->readPlaintextRange(startPos, cb);
+            auto chunk = reader_->readStandardMp4Range(startPos, cb);
             ULONG got = static_cast<ULONG>(chunk.size());
             if (got > 0) {
                 std::memcpy(pb, chunk.data(), got);
@@ -398,7 +401,7 @@ public:
 
     STDMETHODIMP Seek(MFBYTESTREAM_SEEK_ORIGIN origin, LONGLONG offset, DWORD, QWORD* pqwCurrentPosition) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        int64_t total = reader_->totalPlaintextLength();
+        int64_t total = reader_->standardMp4Length();
         int64_t base = (origin == msoCurrent) ? pos_ : 0;
         pos_ = std::clamp<int64_t>(base + offset, 0, total);
         if (pqwCurrentPosition) *pqwCurrentPosition = static_cast<QWORD>(pos_);
@@ -1684,6 +1687,7 @@ bool VaultPlayerEngine::loadClip(std::shared_ptr<VaultClipReader> reader, std::s
     }
 
     // Quickly validate stream & measure exact duration before starting worker thread
+    reader->ensureStandardMp4Layout();
     ComPtr<IMFByteStream> testBs;
     testBs.Attach(new VaultMemoryByteStream(reader));
 
@@ -1698,18 +1702,15 @@ bool VaultPlayerEngine::loadClip(std::shared_ptr<VaultClipReader> reader, std::s
         return false;
     }
 
-    double dur = std::max(0.2, static_cast<double>(reader->header().durationMs) / 1000.0);
+    double dur = std::max(0.2, reader->standardMp4DurationSeconds());
     PROPVARIANT pvDur;
     PropVariantInit(&pvDur);
     if (SUCCEEDED(sr->GetPresentationAttribute(kMfMediaSource, MF_PD_DURATION, &pvDur))) {
         if (pvDur.vt == VT_UI8 && pvDur.uhVal.QuadPart > 0) {
             double mfDur = static_cast<double>(pvDur.uhVal.QuadPart) / 10000000.0;
-            if (mfDur > 0.05) dur = mfDur;
+            if (mfDur > 0.05) dur = std::max(dur, mfDur);
         }
         PropVariantClear(&pvDur);
-    }
-    if (dur < 0.2 && reader->mediaFragmentCount() > 0) {
-        dur = static_cast<double>(reader->mediaFragmentCount()) * 1.0;
     }
     sr.Reset();
     testBs.Reset();

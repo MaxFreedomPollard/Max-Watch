@@ -1,4 +1,5 @@
 #include "VaultCrypto.hpp"
+#include "Fmp4Muxer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1338,6 +1339,108 @@ VaultClipReader::~VaultClipReader() {
     }
     decryptedCache_.clear();
     cacheOrder_.clear();
+    crypto::secureZeroVec(mp4SynthHeader_);
+}
+
+void VaultClipReader::ensureStandardMp4Layout() {
+    std::lock_guard<std::mutex> lock(mp4LayoutMutex_);
+    if (mp4LayoutInitialized_) return;
+    mp4LayoutInitialized_ = true;
+
+    if (chunks_.size() < 2 || chunks_[0].kind != VaultSegmentKind::Initialization) {
+        return;
+    }
+
+    try {
+        std::vector<uint8_t> initPlain = decryptedChunk(chunks_[0]);
+        size_t mediaCount = chunks_.size() - 1;
+        auto layout = buildVirtualStandardMp4Layout(
+            initPlain.data(),
+            initPlain.size(),
+            mediaCount,
+            [this](size_t fragIndex) -> std::vector<uint8_t> {
+                return decryptedChunk(chunks_[fragIndex + 1]);
+            }
+        );
+        crypto::secureZeroVec(initPlain);
+
+        if (layout.valid && !layout.synthesizedHeader.empty()) {
+            mp4LayoutValid_ = true;
+            mp4SynthHeader_ = std::move(layout.synthesizedHeader);
+            mp4OrigInitLen_ = layout.origInitPlaintextLen;
+            mp4MediaLen_ = layout.mediaPlaintextLen;
+            mp4ExactDurationSec_ = layout.durationSeconds;
+            mp4FreeOffsets_ = std::move(layout.freeFourccMediaOffsets);
+        }
+    } catch (...) {
+        mp4LayoutValid_ = false;
+    }
+}
+
+int64_t VaultClipReader::standardMp4Length() {
+    ensureStandardMp4Layout();
+    if (!mp4LayoutValid_) {
+        return totalPlaintextLength_;
+    }
+    return static_cast<int64_t>(mp4SynthHeader_.size()) + static_cast<int64_t>(mp4MediaLen_);
+}
+
+double VaultClipReader::standardMp4DurationSeconds() {
+    ensureStandardMp4Layout();
+    if (mp4LayoutValid_ && mp4ExactDurationSec_ > 0.01) {
+        return mp4ExactDurationSec_;
+    }
+    double hdrDur = static_cast<double>(header_.durationMs) / 1000.0;
+    if (hdrDur > 0.05) return hdrDur;
+    return static_cast<double>(std::max(1, mediaFragmentCount_)) * 1.0;
+}
+
+std::vector<uint8_t> VaultClipReader::readStandardMp4Range(int64_t virtualOffset, size_t length) {
+    ensureStandardMp4Layout();
+    if (!mp4LayoutValid_) {
+        return readPlaintextRange(virtualOffset, length);
+    }
+
+    int64_t totalVirt = static_cast<int64_t>(mp4SynthHeader_.size()) + static_cast<int64_t>(mp4MediaLen_);
+    if (length == 0 || virtualOffset < 0 || virtualOffset >= totalVirt) {
+        return {};
+    }
+
+    int64_t clampedEnd = std::min<int64_t>(totalVirt, virtualOffset + static_cast<int64_t>(length));
+    size_t want = static_cast<size_t>(clampedEnd - virtualOffset);
+    std::vector<uint8_t> out;
+    out.reserve(want);
+
+    int64_t hdrLen = static_cast<int64_t>(mp4SynthHeader_.size());
+    int64_t cur = virtualOffset;
+
+    if (cur < hdrLen) {
+        int64_t hdrTakeEnd = std::min<int64_t>(hdrLen, clampedEnd);
+        out.insert(
+            out.end(),
+            mp4SynthHeader_.begin() + static_cast<size_t>(cur),
+            mp4SynthHeader_.begin() + static_cast<size_t>(hdrTakeEnd)
+        );
+        cur = hdrTakeEnd;
+    }
+
+    if (cur < clampedEnd) {
+        uint64_t mediaOff = static_cast<uint64_t>(cur - hdrLen);
+        size_t mediaWant = static_cast<size_t>(clampedEnd - cur);
+        auto mediaSlice = readPlaintextRange(
+            static_cast<int64_t>(mp4OrigInitLen_ + mediaOff),
+            mediaWant
+        );
+        if (!mediaSlice.empty()) {
+            VirtualStandardMp4Layout patchView;
+            patchView.freeFourccMediaOffsets = mp4FreeOffsets_;
+            applyFreeFourccPatchesToMediaSlice(patchView, mediaOff, mediaSlice.data(), mediaSlice.size());
+            out.insert(out.end(), mediaSlice.begin(), mediaSlice.end());
+            crypto::secureZeroVec(mediaSlice);
+        }
+    }
+
+    return out;
 }
 
 std::vector<uint8_t> VaultClipReader::readPlaintextRange(int64_t offset, size_t length) {
@@ -2007,6 +2110,8 @@ void VaultManager::exportClipAsMP4(const std::wstring& clipPath, const std::wstr
         throw VaultException(VaultErrorKind::IoFailure, "Cannot export plaintext MP4 inside the internal Encrypted Vault.");
     }
     auto reader = openClipReader(clipPath);
+    reader->ensureStandardMp4Layout();
+    const int64_t totalExportBytes = reader->standardMp4Length();
 #ifdef _WIN32
     HANDLE hOut = CreateFileW(
         destinationPath.c_str(),
@@ -2023,8 +2128,8 @@ void VaultManager::exportClipAsMP4(const std::wstring& clipPath, const std::wstr
     int64_t offset = 0;
     constexpr size_t kStep = 1048576;
     try {
-        while (offset < reader->totalPlaintextLength()) {
-            auto chunk = reader->readPlaintextRange(offset, kStep);
+        while (offset < totalExportBytes) {
+            auto chunk = reader->readStandardMp4Range(offset, kStep);
             if (chunk.empty()) break;
             DWORD written = 0;
             BOOL ok = WriteFile(hOut, chunk.data(), static_cast<DWORD>(chunk.size()), &written, nullptr);
@@ -2046,8 +2151,8 @@ void VaultManager::exportClipAsMP4(const std::wstring& clipPath, const std::wstr
     if (!ofs) throw VaultException(VaultErrorKind::IoFailure, "Cannot create destination MP4 file.");
     int64_t offset = 0;
     constexpr size_t kStep = 1048576;
-    while (offset < reader->totalPlaintextLength()) {
-        auto chunk = reader->readPlaintextRange(offset, kStep);
+    while (offset < totalExportBytes) {
+        auto chunk = reader->readStandardMp4Range(offset, kStep);
         if (chunk.empty()) break;
         ofs.write(reinterpret_cast<const char*>(chunk.data()), static_cast<std::streamsize>(chunk.size()));
         offset += static_cast<int64_t>(chunk.size());

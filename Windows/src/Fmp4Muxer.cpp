@@ -723,4 +723,798 @@ std::vector<uint8_t> Fmp4SegmentMuxer::buildMediaFragmentBytes(uint32_t sequence
     return out;
 }
 
+namespace {
+
+uint32_t r24be(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 16) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           static_cast<uint32_t>(p[2]);
+}
+
+uint32_t r32be(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) |
+           static_cast<uint32_t>(p[3]);
+}
+
+uint64_t r64be(const uint8_t* p) {
+    return (static_cast<uint64_t>(r32be(p)) << 32) | static_cast<uint64_t>(r32be(p + 4));
+}
+
+void patch64be(std::vector<uint8_t>& b, size_t offset, uint64_t v) {
+    for (int s = 56, idx = 0; s >= 0; s -= 8, ++idx) {
+        b[offset + static_cast<size_t>(idx)] = static_cast<uint8_t>((v >> s) & 0xFF);
+    }
+}
+
+bool nextIsoBox(
+    const uint8_t* buf,
+    size_t len,
+    size_t& cursor,
+    size_t& boxStart,
+    size_t& payloadStart,
+    size_t& boxEnd,
+    char outType[5]
+) {
+    if (cursor + 8 > len) return false;
+    uint32_t sz32 = r32be(buf + cursor);
+    std::memcpy(outType, buf + cursor + 4, 4);
+    outType[4] = '\0';
+
+    uint64_t totalSz = sz32;
+    size_t hdrLen = 8;
+    if (sz32 == 1) {
+        if (cursor + 16 > len) return false;
+        totalSz = r64be(buf + cursor + 8);
+        hdrLen = 16;
+    } else if (sz32 == 0) {
+        totalSz = len - cursor;
+    }
+    if (totalSz < hdrLen || cursor + totalSz > len) {
+        return false;
+    }
+    boxStart = cursor;
+    payloadStart = cursor + hdrLen;
+    boxEnd = cursor + static_cast<size_t>(totalSz);
+    cursor = boxEnd;
+    return true;
+}
+
+struct ParsedTrexDefaults {
+    uint32_t trackId = 0;
+    uint32_t defaultDuration = 0;
+    uint32_t defaultSize = 0;
+    uint32_t defaultFlags = 0;
+};
+
+struct IndexedMp4Track {
+    bool present = false;
+    bool isVideo = false;
+    uint32_t trackId = 0;
+    uint32_t timescale = 90000;
+    uint32_t widthFixed16 = 0;
+    uint32_t heightFixed16 = 0;
+    std::vector<uint8_t> stsdBox;
+
+    uint32_t trexDefaultDuration = 0;
+    uint32_t trexDefaultSize = 0;
+    uint32_t trexDefaultFlags = 0;
+
+    std::vector<uint32_t> sampleDurations;
+    std::vector<uint32_t> sampleSizes;
+    std::vector<int32_t> sampleCto;
+    bool hasNonZeroCto = false;
+    std::vector<uint32_t> syncSamples1Based;
+
+    std::vector<uint64_t> chunkOffsetsInMedia;
+    std::vector<uint32_t> chunkSampleCounts;
+    uint64_t totalDurationTicks = 0;
+};
+
+void writeSttsFromDurations(std::vector<uint8_t>& stbl, const std::vector<uint32_t>& durs) {
+    struct Entry { uint32_t count; uint32_t delta; };
+    std::vector<Entry> rle;
+    for (uint32_t d : durs) {
+        if (!rle.empty() && rle.back().delta == d) {
+            rle.back().count++;
+        } else {
+            rle.push_back({1, d});
+        }
+    }
+    BoxScope stts(stbl, "stts");
+    w32(stbl, 0);
+    w32(stbl, static_cast<uint32_t>(rle.size()));
+    for (const auto& e : rle) {
+        w32(stbl, e.count);
+        w32(stbl, e.delta);
+    }
+    stts.finish();
+}
+
+void writeCttsFromOffsets(std::vector<uint8_t>& stbl, const std::vector<int32_t>& ctos) {
+    struct Entry { uint32_t count; int32_t offset; };
+    std::vector<Entry> rle;
+    for (int32_t c : ctos) {
+        if (!rle.empty() && rle.back().offset == c) {
+            rle.back().count++;
+        } else {
+            rle.push_back({1, c});
+        }
+    }
+    BoxScope ctts(stbl, "ctts");
+    w8(stbl, 1); // version 1 supports signed composition offsets
+    w24(stbl, 0);
+    w32(stbl, static_cast<uint32_t>(rle.size()));
+    for (const auto& e : rle) {
+        w32(stbl, e.count);
+        w32(stbl, static_cast<uint32_t>(e.offset));
+    }
+    ctts.finish();
+}
+
+void writeStssBox(std::vector<uint8_t>& stbl, const std::vector<uint32_t>& syncs) {
+    BoxScope stss(stbl, "stss");
+    w32(stbl, 0);
+    w32(stbl, static_cast<uint32_t>(syncs.size()));
+    for (uint32_t s : syncs) {
+        w32(stbl, s);
+    }
+    stss.finish();
+}
+
+void writeStscFromChunkCounts(std::vector<uint8_t>& stbl, const std::vector<uint32_t>& counts) {
+    struct Entry { uint32_t firstChunk1Based; uint32_t samplesPerChunk; };
+    std::vector<Entry> rle;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        uint32_t spc = counts[i];
+        if (rle.empty() || rle.back().samplesPerChunk != spc) {
+            rle.push_back({static_cast<uint32_t>(i + 1), spc});
+        }
+    }
+    BoxScope stsc(stbl, "stsc");
+    w32(stbl, 0);
+    w32(stbl, static_cast<uint32_t>(rle.size()));
+    for (const auto& e : rle) {
+        w32(stbl, e.firstChunk1Based);
+        w32(stbl, e.samplesPerChunk);
+        w32(stbl, 1); // sample_description_index = 1
+    }
+    stsc.finish();
+}
+
+void writeStszFromSizes(std::vector<uint8_t>& stbl, const std::vector<uint32_t>& sizes) {
+    BoxScope stsz(stbl, "stsz");
+    w32(stbl, 0);
+    w32(stbl, 0); // variable sample sizes
+    w32(stbl, static_cast<uint32_t>(sizes.size()));
+    for (uint32_t s : sizes) {
+        w32(stbl, s);
+    }
+    stsz.finish();
+}
+
+size_t writeCo64Placeholder(std::vector<uint8_t>& stbl, const std::vector<uint64_t>& mediaOffsets) {
+    BoxScope co64(stbl, "co64");
+    w32(stbl, 0);
+    w32(stbl, static_cast<uint32_t>(mediaOffsets.size()));
+    size_t entriesStart = stbl.size();
+    for (uint64_t off : mediaOffsets) {
+        w64(stbl, off);
+    }
+    co64.finish();
+    return entriesStart;
+}
+
+} // namespace
+
+VirtualStandardMp4Layout buildVirtualStandardMp4Layout(
+    const uint8_t* initBytes,
+    size_t initLen,
+    size_t mediaFragmentCount,
+    const std::function<std::vector<uint8_t>(size_t fragmentIndex)>& readMediaFragment
+) {
+    VirtualStandardMp4Layout layout;
+    if (!initBytes || initLen < 24 || mediaFragmentCount == 0 || !readMediaFragment) {
+        return layout;
+    }
+
+    IndexedMp4Track vidTrack;
+    IndexedMp4Track audTrack;
+    std::vector<ParsedTrexDefaults> trexList;
+
+    // 1. Parse `moov` inside `initBytes`
+    size_t topCur = 0;
+    size_t bStart = 0, pStart = 0, bEnd = 0;
+    char bType[5] = {0};
+    while (nextIsoBox(initBytes, initLen, topCur, bStart, pStart, bEnd, bType)) {
+        if (std::strcmp(bType, "moov") != 0) continue;
+
+        size_t moovCur = pStart;
+        size_t mbStart = 0, mpStart = 0, mbEnd = 0;
+        char mbType[5] = {0};
+        while (nextIsoBox(initBytes, bEnd, moovCur, mbStart, mpStart, mbEnd, mbType)) {
+            if (std::strcmp(mbType, "trak") == 0) {
+                uint32_t trackId = 0;
+                uint32_t widthFixed = 0, heightFixed = 0;
+                uint32_t timescale = 0;
+                char handler[5] = {0};
+                std::vector<uint8_t> stsdVerbatim;
+
+                size_t tCur = mpStart;
+                size_t tbStart = 0, tpStart = 0, tbEnd = 0;
+                char tbType[5] = {0};
+                while (nextIsoBox(initBytes, mbEnd, tCur, tbStart, tpStart, tbEnd, tbType)) {
+                    if (std::strcmp(tbType, "tkhd") == 0 && tpStart + 4 <= tbEnd) {
+                        uint8_t ver = initBytes[tpStart];
+                        if (ver == 0 && tpStart + 84 <= tbEnd) {
+                            trackId = r32be(initBytes + tpStart + 12);
+                            widthFixed = r32be(initBytes + tpStart + 76);
+                            heightFixed = r32be(initBytes + tpStart + 80);
+                        } else if (ver == 1 && tpStart + 96 <= tbEnd) {
+                            trackId = r32be(initBytes + tpStart + 20);
+                            widthFixed = r32be(initBytes + tpStart + 88);
+                            heightFixed = r32be(initBytes + tpStart + 92);
+                        }
+                    } else if (std::strcmp(tbType, "mdia") == 0) {
+                        size_t mdCur = tpStart;
+                        size_t mdbStart = 0, mdpStart = 0, mdbEnd = 0;
+                        char mdbType[5] = {0};
+                        while (nextIsoBox(initBytes, tbEnd, mdCur, mdbStart, mdpStart, mdbEnd, mdbType)) {
+                            if (std::strcmp(mdbType, "mdhd") == 0 && mdpStart + 4 <= mdbEnd) {
+                                uint8_t ver = initBytes[mdpStart];
+                                if (ver == 0 && mdpStart + 16 <= mdbEnd) {
+                                    timescale = r32be(initBytes + mdpStart + 12);
+                                } else if (ver == 1 && mdpStart + 24 <= mdbEnd) {
+                                    timescale = r32be(initBytes + mdpStart + 20);
+                                }
+                            } else if (std::strcmp(mdbType, "hdlr") == 0 && mdpStart + 12 <= mdbEnd) {
+                                std::memcpy(handler, initBytes + mdpStart + 8, 4);
+                                handler[4] = '\0';
+                            } else if (std::strcmp(mdbType, "minf") == 0) {
+                                size_t miCur = mdpStart;
+                                size_t mibStart = 0, mipStart = 0, mibEnd = 0;
+                                char mibType[5] = {0};
+                                while (nextIsoBox(initBytes, mdbEnd, miCur, mibStart, mipStart, mibEnd, mibType)) {
+                                    if (std::strcmp(mibType, "stbl") == 0) {
+                                        size_t stCur = mipStart;
+                                        size_t sbStart = 0, spStart = 0, sbEnd = 0;
+                                        char sbType[5] = {0};
+                                        while (nextIsoBox(initBytes, mibEnd, stCur, sbStart, spStart, sbEnd, sbType)) {
+                                            if (std::strcmp(sbType, "stsd") == 0) {
+                                                stsdVerbatim.assign(initBytes + sbStart, initBytes + sbEnd);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (trackId != 0 && !stsdVerbatim.empty()) {
+                    if (std::strcmp(handler, "vide") == 0 && !vidTrack.present) {
+                        vidTrack.present = true;
+                        vidTrack.isVideo = true;
+                        vidTrack.trackId = trackId;
+                        vidTrack.timescale = timescale > 0 ? timescale : 90000;
+                        vidTrack.widthFixed16 = widthFixed;
+                        vidTrack.heightFixed16 = heightFixed;
+                        vidTrack.stsdBox = std::move(stsdVerbatim);
+                    } else if (std::strcmp(handler, "soun") == 0 && !audTrack.present) {
+                        audTrack.present = true;
+                        audTrack.isVideo = false;
+                        audTrack.trackId = trackId;
+                        audTrack.timescale = timescale > 0 ? timescale : 48000;
+                        audTrack.stsdBox = std::move(stsdVerbatim);
+                    }
+                }
+            } else if (std::strcmp(mbType, "mvex") == 0) {
+                size_t mvCur = mpStart;
+                size_t xStart = 0, xpStart = 0, xEnd = 0;
+                char xType[5] = {0};
+                while (nextIsoBox(initBytes, mbEnd, mvCur, xStart, xpStart, xEnd, xType)) {
+                    if (std::strcmp(xType, "trex") == 0 && xpStart + 24 <= xEnd) {
+                        ParsedTrexDefaults td;
+                        td.trackId = r32be(initBytes + xpStart + 4);
+                        td.defaultDuration = r32be(initBytes + xpStart + 12);
+                        td.defaultSize = r32be(initBytes + xpStart + 16);
+                        td.defaultFlags = r32be(initBytes + xpStart + 20);
+                        trexList.push_back(td);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!vidTrack.present) {
+        return layout;
+    }
+
+    for (const auto& td : trexList) {
+        if (td.trackId == vidTrack.trackId) {
+            vidTrack.trexDefaultDuration = td.defaultDuration;
+            vidTrack.trexDefaultSize = td.defaultSize;
+            vidTrack.trexDefaultFlags = td.defaultFlags;
+        } else if (audTrack.present && td.trackId == audTrack.trackId) {
+            audTrack.trexDefaultDuration = td.defaultDuration;
+            audTrack.trexDefaultSize = td.defaultSize;
+            audTrack.trexDefaultFlags = td.defaultFlags;
+        }
+    }
+
+    // 2. Scan each media fragment (`moof + mdat`) and record exact sample & chunk offsets
+    uint64_t fragOffsetInMedia = 0;
+    for (size_t fIdx = 0; fIdx < mediaFragmentCount; ++fIdx) {
+        std::vector<uint8_t> frag = readMediaFragment(fIdx);
+        if (frag.empty()) break;
+
+        size_t fCur = 0;
+        size_t fbStart = 0, fpStart = 0, fbEnd = 0;
+        char fbType[5] = {0};
+        while (nextIsoBox(frag.data(), frag.size(), fCur, fbStart, fpStart, fbEnd, fbType)) {
+            if (std::strcmp(fbType, "moof") == 0 ||
+                std::strcmp(fbType, "sidx") == 0 ||
+                std::strcmp(fbType, "styp") == 0) {
+                layout.freeFourccMediaOffsets.push_back(fragOffsetInMedia + fbStart + 4);
+            }
+            if (std::strcmp(fbType, "moof") != 0) {
+                continue;
+            }
+
+            size_t moofCur = fpStart;
+            size_t trStart = 0, trpStart = 0, trEnd = 0;
+            char trType[5] = {0};
+            while (nextIsoBox(frag.data(), fbEnd, moofCur, trStart, trpStart, trEnd, trType)) {
+                if (std::strcmp(trType, "traf") != 0) continue;
+
+                // Pass 1 inside `traf`: locate `tfhd`
+                bool foundTfhd = false;
+                uint32_t tfhdTrackId = 0;
+                uint32_t tfhdFlags = 0;
+                uint64_t explicitBaseOffset = 0;
+                uint32_t defDur = 0, defSize = 0, defFlags = 0;
+
+                size_t c1 = trpStart;
+                size_t s1 = 0, p1 = 0, e1 = 0;
+                char t1[5] = {0};
+                while (nextIsoBox(frag.data(), trEnd, c1, s1, p1, e1, t1)) {
+                    if (std::strcmp(t1, "tfhd") == 0 && p1 + 8 <= e1) {
+                        foundTfhd = true;
+                        tfhdFlags = r24be(frag.data() + p1 + 1);
+                        tfhdTrackId = r32be(frag.data() + p1 + 4);
+
+                        IndexedMp4Track* trk = nullptr;
+                        if (tfhdTrackId == vidTrack.trackId) trk = &vidTrack;
+                        else if (audTrack.present && tfhdTrackId == audTrack.trackId) trk = &audTrack;
+
+                        if (trk) {
+                            defDur = trk->trexDefaultDuration;
+                            defSize = trk->trexDefaultSize;
+                            defFlags = trk->trexDefaultFlags;
+                        }
+
+                        size_t off = p1 + 8;
+                        if ((tfhdFlags & 0x000001) && off + 8 <= e1) {
+                            explicitBaseOffset = r64be(frag.data() + off);
+                            off += 8;
+                        }
+                        if ((tfhdFlags & 0x000002) && off + 4 <= e1) {
+                            off += 4;
+                        }
+                        if ((tfhdFlags & 0x000008) && off + 4 <= e1) {
+                            defDur = r32be(frag.data() + off);
+                            off += 4;
+                        }
+                        if ((tfhdFlags & 0x000010) && off + 4 <= e1) {
+                            defSize = r32be(frag.data() + off);
+                            off += 4;
+                        }
+                        if ((tfhdFlags & 0x000020) && off + 4 <= e1) {
+                            defFlags = r32be(frag.data() + off);
+                            off += 4;
+                        }
+                        break;
+                    }
+                }
+                if (!foundTfhd) continue;
+
+                IndexedMp4Track* targetTrack = nullptr;
+                if (tfhdTrackId == vidTrack.trackId) targetTrack = &vidTrack;
+                else if (audTrack.present && tfhdTrackId == audTrack.trackId) targetTrack = &audTrack;
+                if (!targetTrack) continue;
+
+                int64_t trafBaseInMedia = static_cast<int64_t>(fragOffsetInMedia + fbStart);
+                if (tfhdFlags & 0x000001) {
+                    trafBaseInMedia = static_cast<int64_t>(explicitBaseOffset) - static_cast<int64_t>(initLen);
+                }
+                int64_t runningPosInMedia = trafBaseInMedia;
+
+                // Pass 2 inside `traf`: iterate `trun` boxes
+                size_t c2 = trpStart;
+                size_t s2 = 0, p2 = 0, e2 = 0;
+                char t2[5] = {0};
+                while (nextIsoBox(frag.data(), trEnd, c2, s2, p2, e2, t2)) {
+                    if (std::strcmp(t2, "trun") != 0 || p2 + 8 > e2) continue;
+                    uint8_t trunVer = frag[p2];
+                    uint32_t trunFlags = r24be(frag.data() + p2 + 1);
+                    uint32_t sampleCount = r32be(frag.data() + p2 + 4);
+                    size_t off = p2 + 8;
+
+                    if ((trunFlags & 0x000001) && off + 4 <= e2) {
+                        int32_t dataOff = static_cast<int32_t>(r32be(frag.data() + off));
+                        off += 4;
+                        runningPosInMedia = trafBaseInMedia + dataOff;
+                    }
+                    uint32_t firstFlags = defFlags;
+                    if ((trunFlags & 0x000004) && off + 4 <= e2) {
+                        firstFlags = r32be(frag.data() + off);
+                        off += 4;
+                    }
+
+                    if (sampleCount == 0 || runningPosInMedia < 0) continue;
+
+                    uint64_t chunkStartMedia = static_cast<uint64_t>(runningPosInMedia);
+                    uint32_t validSamplesInRun = 0;
+                    for (uint32_t i = 0; i < sampleCount; ++i) {
+                        uint32_t sDur = defDur;
+                        if (trunFlags & 0x000100) {
+                            if (off + 4 > e2) break;
+                            sDur = r32be(frag.data() + off);
+                            off += 4;
+                        }
+                        uint32_t sSize = defSize;
+                        if (trunFlags & 0x000200) {
+                            if (off + 4 > e2) break;
+                            sSize = r32be(frag.data() + off);
+                            off += 4;
+                        }
+                        uint32_t sFlags = (i == 0 && (trunFlags & 0x000004)) ? firstFlags : defFlags;
+                        if (trunFlags & 0x000400) {
+                            if (off + 4 > e2) break;
+                            sFlags = r32be(frag.data() + off);
+                            off += 4;
+                        }
+                        int32_t sCto = 0;
+                        if (trunFlags & 0x000800) {
+                            if (off + 4 > e2) break;
+                            uint32_t rawCto = r32be(frag.data() + off);
+                            off += 4;
+                            sCto = (trunVer == 1) ? static_cast<int32_t>(rawCto) : static_cast<int32_t>(rawCto);
+                        }
+
+                        if (sDur == 0) sDur = targetTrack->isVideo ? 3000U : 1024U;
+                        if (runningPosInMedia + static_cast<int64_t>(sSize) > static_cast<int64_t>(fragOffsetInMedia + frag.size())) {
+                            break;
+                        }
+
+                        targetTrack->sampleDurations.push_back(sDur);
+                        targetTrack->sampleSizes.push_back(sSize);
+                        targetTrack->totalDurationTicks += sDur;
+
+                        if (targetTrack->isVideo) {
+                            bool isSync = ((sFlags & 0x00010000U) == 0) || targetTrack->sampleSizes.size() == 1;
+                            if (isSync) {
+                                targetTrack->syncSamples1Based.push_back(static_cast<uint32_t>(targetTrack->sampleSizes.size()));
+                            }
+                            targetTrack->sampleCto.push_back(sCto);
+                            if (sCto != 0) targetTrack->hasNonZeroCto = true;
+                        }
+
+                        runningPosInMedia += static_cast<int64_t>(sSize);
+                        validSamplesInRun++;
+                    }
+
+                    if (validSamplesInRun > 0) {
+                        targetTrack->chunkOffsetsInMedia.push_back(chunkStartMedia);
+                        targetTrack->chunkSampleCounts.push_back(validSamplesInRun);
+                    }
+                }
+            }
+        }
+
+        fragOffsetInMedia += frag.size();
+        std::fill(frag.begin(), frag.end(), uint8_t(0));
+    }
+
+    if (vidTrack.sampleSizes.empty() || vidTrack.chunkOffsetsInMedia.empty()) {
+        return layout;
+    }
+
+    // 3. Synthesize standard unfragmented `ftyp + moov` header
+    constexpr uint32_t kMovieTimescale = 90000;
+    uint64_t vidMovieDur = (vidTrack.totalDurationTicks * kMovieTimescale) / std::max<uint32_t>(1, vidTrack.timescale);
+    uint64_t audMovieDur = (audTrack.present && !audTrack.sampleSizes.empty())
+        ? ((audTrack.totalDurationTicks * kMovieTimescale) / std::max<uint32_t>(1, audTrack.timescale))
+        : 0;
+    uint64_t movieDur = vidMovieDur > 0 ? vidMovieDur : audMovieDur;
+    bool includeAudio = audTrack.present && !audTrack.sampleSizes.empty() && !audTrack.chunkOffsetsInMedia.empty();
+    uint32_t nextTrackId = std::max(vidTrack.trackId, includeAudio ? audTrack.trackId : 1U) + 1U;
+
+    std::vector<uint8_t> hdr;
+    hdr.reserve(2048 + (vidTrack.sampleSizes.size() + audTrack.sampleSizes.size()) * 8);
+
+    // ftyp
+    {
+        BoxScope ftyp(hdr, "ftyp");
+        wFourCC(hdr, "isom");
+        w32(hdr, 0x00000200);
+        wFourCC(hdr, "isom");
+        wFourCC(hdr, "iso2");
+        wFourCC(hdr, "avc1");
+        wFourCC(hdr, "mp41");
+        ftyp.finish();
+    }
+
+    size_t vidCo64EntriesPos = 0;
+    size_t audCo64EntriesPos = 0;
+
+    // moov
+    {
+        BoxScope moov(hdr, "moov");
+
+        // mvhd
+        {
+            BoxScope mvhd(hdr, "mvhd");
+            if (movieDur > 0xFFFFFFFFULL) {
+                w8(hdr, 1);
+                w24(hdr, 0);
+                w64(hdr, 0);
+                w64(hdr, 0);
+                w32(hdr, kMovieTimescale);
+                w64(hdr, movieDur);
+            } else {
+                w8(hdr, 0);
+                w24(hdr, 0);
+                w32(hdr, 0);
+                w32(hdr, 0);
+                w32(hdr, kMovieTimescale);
+                w32(hdr, static_cast<uint32_t>(movieDur));
+            }
+            w32(hdr, 0x00010000);
+            w16(hdr, 0x0100);
+            w16(hdr, 0);
+            wZeros(hdr, 8);
+            writeUnityMatrix(hdr);
+            wZeros(hdr, 24);
+            w32(hdr, nextTrackId);
+            mvhd.finish();
+        }
+
+        // Video trak
+        {
+            BoxScope trak(hdr, "trak");
+            {
+                BoxScope tkhd(hdr, "tkhd");
+                if (vidMovieDur > 0xFFFFFFFFULL) {
+                    w8(hdr, 1);
+                    w24(hdr, 0x000003);
+                    w64(hdr, 0);
+                    w64(hdr, 0);
+                    w32(hdr, vidTrack.trackId);
+                    w32(hdr, 0);
+                    w64(hdr, vidMovieDur);
+                } else {
+                    w8(hdr, 0);
+                    w24(hdr, 0x000003);
+                    w32(hdr, 0);
+                    w32(hdr, 0);
+                    w32(hdr, vidTrack.trackId);
+                    w32(hdr, 0);
+                    w32(hdr, static_cast<uint32_t>(vidMovieDur));
+                }
+                wZeros(hdr, 8);
+                w16(hdr, 0);
+                w16(hdr, 0);
+                w16(hdr, 0);
+                w16(hdr, 0);
+                writeUnityMatrix(hdr);
+                w32(hdr, vidTrack.widthFixed16);
+                w32(hdr, vidTrack.heightFixed16);
+                tkhd.finish();
+            }
+            {
+                BoxScope mdia(hdr, "mdia");
+                {
+                    BoxScope mdhd(hdr, "mdhd");
+                    if (vidTrack.totalDurationTicks > 0xFFFFFFFFULL) {
+                        w8(hdr, 1);
+                        w24(hdr, 0);
+                        w64(hdr, 0);
+                        w64(hdr, 0);
+                        w32(hdr, vidTrack.timescale);
+                        w64(hdr, vidTrack.totalDurationTicks);
+                    } else {
+                        w8(hdr, 0);
+                        w24(hdr, 0);
+                        w32(hdr, 0);
+                        w32(hdr, 0);
+                        w32(hdr, vidTrack.timescale);
+                        w32(hdr, static_cast<uint32_t>(vidTrack.totalDurationTicks));
+                    }
+                    w16(hdr, 0x55C4);
+                    w16(hdr, 0);
+                    mdhd.finish();
+                }
+                {
+                    BoxScope hdlr(hdr, "hdlr");
+                    w32(hdr, 0);
+                    w32(hdr, 0);
+                    wFourCC(hdr, "vide");
+                    wZeros(hdr, 12);
+                    const char* name = "VideoHandler";
+                    hdr.insert(hdr.end(), name, name + std::strlen(name) + 1);
+                    hdlr.finish();
+                }
+                {
+                    BoxScope minf(hdr, "minf");
+                    {
+                        BoxScope vmhd(hdr, "vmhd");
+                        w8(hdr, 0);
+                        w24(hdr, 0x000001);
+                        w16(hdr, 0);
+                        wZeros(hdr, 6);
+                        vmhd.finish();
+                    }
+                    writeSelfContainedDinf(hdr);
+                    {
+                        BoxScope stbl(hdr, "stbl");
+                        hdr.insert(hdr.end(), vidTrack.stsdBox.begin(), vidTrack.stsdBox.end());
+                        writeSttsFromDurations(hdr, vidTrack.sampleDurations);
+                        if (vidTrack.hasNonZeroCto) {
+                            writeCttsFromOffsets(hdr, vidTrack.sampleCto);
+                        }
+                        writeStssBox(hdr, vidTrack.syncSamples1Based);
+                        writeStscFromChunkCounts(hdr, vidTrack.chunkSampleCounts);
+                        writeStszFromSizes(hdr, vidTrack.sampleSizes);
+                        vidCo64EntriesPos = writeCo64Placeholder(hdr, vidTrack.chunkOffsetsInMedia);
+                        stbl.finish();
+                    }
+                    minf.finish();
+                }
+                mdia.finish();
+            }
+            trak.finish();
+        }
+
+        // Optional Audio trak
+        if (includeAudio) {
+            BoxScope trak(hdr, "trak");
+            {
+                BoxScope tkhd(hdr, "tkhd");
+                if (audMovieDur > 0xFFFFFFFFULL) {
+                    w8(hdr, 1);
+                    w24(hdr, 0x000003);
+                    w64(hdr, 0);
+                    w64(hdr, 0);
+                    w32(hdr, audTrack.trackId);
+                    w32(hdr, 0);
+                    w64(hdr, audMovieDur);
+                } else {
+                    w8(hdr, 0);
+                    w24(hdr, 0x000003);
+                    w32(hdr, 0);
+                    w32(hdr, 0);
+                    w32(hdr, audTrack.trackId);
+                    w32(hdr, 0);
+                    w32(hdr, static_cast<uint32_t>(audMovieDur));
+                }
+                wZeros(hdr, 8);
+                w16(hdr, 0);
+                w16(hdr, 0);
+                w16(hdr, 0x0100);
+                w16(hdr, 0);
+                writeUnityMatrix(hdr);
+                w32(hdr, 0);
+                w32(hdr, 0);
+                tkhd.finish();
+            }
+            {
+                BoxScope mdia(hdr, "mdia");
+                {
+                    BoxScope mdhd(hdr, "mdhd");
+                    if (audTrack.totalDurationTicks > 0xFFFFFFFFULL) {
+                        w8(hdr, 1);
+                        w24(hdr, 0);
+                        w64(hdr, 0);
+                        w64(hdr, 0);
+                        w32(hdr, audTrack.timescale);
+                        w64(hdr, audTrack.totalDurationTicks);
+                    } else {
+                        w8(hdr, 0);
+                        w24(hdr, 0);
+                        w32(hdr, 0);
+                        w32(hdr, 0);
+                        w32(hdr, audTrack.timescale);
+                        w32(hdr, static_cast<uint32_t>(audTrack.totalDurationTicks));
+                    }
+                    w16(hdr, 0x55C4);
+                    w16(hdr, 0);
+                    mdhd.finish();
+                }
+                {
+                    BoxScope hdlr(hdr, "hdlr");
+                    w32(hdr, 0);
+                    w32(hdr, 0);
+                    wFourCC(hdr, "soun");
+                    wZeros(hdr, 12);
+                    const char* name = "SoundHandler";
+                    hdr.insert(hdr.end(), name, name + std::strlen(name) + 1);
+                    hdlr.finish();
+                }
+                {
+                    BoxScope minf(hdr, "minf");
+                    {
+                        BoxScope smhd(hdr, "smhd");
+                        w32(hdr, 0);
+                        w16(hdr, 0);
+                        w16(hdr, 0);
+                        smhd.finish();
+                    }
+                    writeSelfContainedDinf(hdr);
+                    {
+                        BoxScope stbl(hdr, "stbl");
+                        hdr.insert(hdr.end(), audTrack.stsdBox.begin(), audTrack.stsdBox.end());
+                        writeSttsFromDurations(hdr, audTrack.sampleDurations);
+                        writeStscFromChunkCounts(hdr, audTrack.chunkSampleCounts);
+                        writeStszFromSizes(hdr, audTrack.sampleSizes);
+                        audCo64EntriesPos = writeCo64Placeholder(hdr, audTrack.chunkOffsetsInMedia);
+                        stbl.finish();
+                    }
+                    minf.finish();
+                }
+                mdia.finish();
+            }
+            trak.finish();
+        }
+
+        moov.finish();
+    }
+
+    // 4. Patch exact 64-bit file offsets into `co64` now that `hdr.size()` is finalized!
+    uint64_t finalHdrSize = static_cast<uint64_t>(hdr.size());
+    for (size_t i = 0; i < vidTrack.chunkOffsetsInMedia.size(); ++i) {
+        patch64be(hdr, vidCo64EntriesPos + i * 8, finalHdrSize + vidTrack.chunkOffsetsInMedia[i]);
+    }
+    if (includeAudio) {
+        for (size_t i = 0; i < audTrack.chunkOffsetsInMedia.size(); ++i) {
+            patch64be(hdr, audCo64EntriesPos + i * 8, finalHdrSize + audTrack.chunkOffsetsInMedia[i]);
+        }
+    }
+
+    layout.valid = true;
+    layout.synthesizedHeader = std::move(hdr);
+    layout.origInitPlaintextLen = static_cast<uint64_t>(initLen);
+    layout.mediaPlaintextLen = fragOffsetInMedia;
+    layout.durationSeconds = static_cast<double>(vidTrack.totalDurationTicks) / static_cast<double>(std::max<uint32_t>(1, vidTrack.timescale));
+    return layout;
+}
+
+void applyFreeFourccPatchesToMediaSlice(
+    const VirtualStandardMp4Layout& layout,
+    uint64_t sliceMediaOffset,
+    uint8_t* buf,
+    size_t bufLen
+) {
+    if (!buf || bufLen == 0 || layout.freeFourccMediaOffsets.empty()) return;
+    uint64_t sliceEnd = sliceMediaOffset + static_cast<uint64_t>(bufLen);
+    static const uint8_t kFree[4] = {'f', 'r', 'e', 'e'};
+
+    auto it = std::lower_bound(
+        layout.freeFourccMediaOffsets.begin(),
+        layout.freeFourccMediaOffsets.end(),
+        sliceMediaOffset > 4 ? (sliceMediaOffset - 4) : 0ULL
+    );
+    for (; it != layout.freeFourccMediaOffsets.end(); ++it) {
+        uint64_t patchPos = *it;
+        if (patchPos >= sliceEnd) break;
+        for (uint64_t k = 0; k < 4; ++k) {
+            uint64_t p = patchPos + k;
+            if (p >= sliceMediaOffset && p < sliceEnd) {
+                buf[static_cast<size_t>(p - sliceMediaOffset)] = kFree[k];
+            }
+        }
+    }
+}
+
 } // namespace maxwatch

@@ -42,19 +42,39 @@ if (!(Test-Path $ExeArm64)) { throw "Missing ARM64 executable at $ExeArm64" }
 
 $HostExe = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { $ExeArm64 } else { $ExeX64 }
 
+function Invoke-MaxWatchCli {
+    param(
+        [Parameter(Mandatory=$true)][string]$ExePath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments
+    )
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $errFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $argLine = ($Arguments | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+        $proc = Start-Process -FilePath $ExePath -ArgumentList $argLine -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        if (Test-Path $outFile) {
+            $outText = Get-Content -Path $outFile -Raw -ErrorAction SilentlyContinue
+            if ($outText) { Write-Host $outText.TrimEnd() }
+        }
+        if (Test-Path $errFile) {
+            $errText = Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue
+            if ($errText) { Write-Host $errText.TrimEnd() }
+        }
+        if ($proc.ExitCode -ne 0) {
+            throw "$ExePath $argLine failed with exit code $($proc.ExitCode)"
+        }
+    } finally {
+        Remove-Item -Force -ErrorAction SilentlyContinue $outFile, $errFile
+    }
+}
+
 Write-Host "=== [3/5] Running 14-Stage Automated Cryptographic, Power-Cut & Playback Self-Test ==="
 $SelfTestTmp = Join-Path $BuildRoot "selftest_tmp"
-& $HostExe --selftest $SelfTestTmp
-if ($LASTEXITCODE -ne 0) {
-    throw "MaxWatch.exe --selftest failed with exit code $LASTEXITCODE"
-}
+Invoke-MaxWatchCli -ExePath $HostExe -Arguments @("--selftest", $SelfTestTmp)
 
 Write-Host "=== [4/5] Running Direct2D Studio UI Smoke Test ==="
 $SmokeDir = Join-Path $DistDir "screenshots"
-& $HostExe --ui-smoke-test $SmokeDir
-if ($LASTEXITCODE -ne 0) {
-    throw "MaxWatch.exe --ui-smoke-test failed with exit code $LASTEXITCODE"
-}
+Invoke-MaxWatchCli -ExePath $HostExe -Arguments @("--ui-smoke-test", $SmokeDir)
 
 Write-Host "=== [5/5] Packaging Portable Editions & Universal (x64 + ARM64) Windows Setup Installer ==="
 $PortableX64 = Join-Path $DistDir "Max-Watch-$Version-Windows-Portable-x64.exe"
