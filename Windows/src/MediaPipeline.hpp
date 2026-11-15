@@ -265,6 +265,7 @@ private:
 
     std::atomic<bool> workerStop_{false};
     std::atomic<bool> clipLoaded_{false};
+    std::atomic<bool> initialFrameReady_{false};
     std::atomic<bool> isPlaying_{false};
     std::atomic<bool> isMuted_{false};
     std::atomic<float> speedRate_{1.0f};

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <array>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -175,7 +176,7 @@ private:
     uint64_t nextChunkIndex_ = 0;
     mutable std::mutex mutex_;
 #ifdef _WIN32
-    void* fileHandle_ = reinterpret_cast<void*>(-1);
+    void* fileHandle_ = reinterpret_cast<void*>(static_cast<intptr_t>(-1));
 #else
     int fd_ = -1;
 #endif
@@ -236,7 +237,7 @@ private:
     int mediaFragmentCount_ = 0;
     std::array<uint8_t, 32> clipKey_{};
 #ifdef _WIN32
-    void* fileHandle_ = reinterpret_cast<void*>(-1);
+    void* fileHandle_ = reinterpret_cast<void*>(static_cast<intptr_t>(-1));
 #else
     int fd_ = -1;
 #endif

@@ -16,10 +16,11 @@
 #include <mfreadwrite.h>
 #include <mferror.h>
 #include <wmcodecdsp.h>
-#include <codecapi.h>
 #include <strmif.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <initguid.h>
+#include <codecapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <propvarutil.h>
 #include <wrl/client.h>
@@ -1249,6 +1250,7 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
         uint8_t* yPlane = nv12.data();
         uint8_t* uvPlane = nv12.data() + w * h;
         uint64_t frameCounter = 0;
+        auto startSteady = std::chrono::steady_clock::now();
 
         while (running_.load()) {
             // Render rich dark studio room gradient + moving test subject so motion detector triggers realistically
@@ -1300,7 +1302,11 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
             }
 
             frameCounter++;
-            Sleep(33);
+            auto nextDeadline = startSteady + std::chrono::microseconds(frameCounter * 33333ULL);
+            auto nowSteady = std::chrono::steady_clock::now();
+            if (nextDeadline > nowSteady) {
+                std::this_thread::sleep_for(nextDeadline - nowSteady);
+            }
         }
         return;
     }
@@ -1704,12 +1710,21 @@ bool VaultPlayerEngine::loadClip(std::shared_ptr<VaultClipReader> reader, std::s
     durationSec_.store(dur);
     currentSec_.store(0.0);
     isPlaying_.store(false);
+    initialFrameReady_.store(false);
     hasPendingScrub_.store(true);
     pendingScrubSec_.store(0.0); // Decode initial frame at t = 0.0 immediately!
     workerStop_.store(false);
     clipLoaded_.store(true);
 
     playerThread_ = std::thread(&VaultPlayerEngine::playerWorkerLoop, this, std::move(reader));
+
+    // Wait up to 1.5s for the initial frame at t = 0.0 to be decoded into RAM so callers see an immediate frame
+    {
+        std::unique_lock<std::mutex> lock(wakeMutex_);
+        wakeCv_.wait_for(lock, std::chrono::milliseconds(1500), [this]() {
+            return initialFrameReady_.load() || workerStop_.load();
+        });
+    }
     return true;
 }
 
@@ -1721,6 +1736,7 @@ void VaultPlayerEngine::unloadClip() {
         playerThread_.join();
     }
     clipLoaded_.store(false);
+    initialFrameReady_.store(false);
     currentSec_.store(0.0);
     durationSec_.store(0.0);
     {
@@ -1897,6 +1913,9 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
             }
             currentSec_.store(sec);
             if (sec > durationSec_.load()) durationSec_.store(sec);
+            if (!initialFrameReady_.exchange(true)) {
+                wakeCv_.notify_all();
+            }
         }
         buf->Unlock();
     };

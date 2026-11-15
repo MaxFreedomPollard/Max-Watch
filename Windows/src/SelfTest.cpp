@@ -373,7 +373,9 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
 
                 // Test fast ball scrub chase across multiple timestamps
                 player.scrubToSeconds(1.5);
-                std::this_thread::sleep_for(std::chrono::milliseconds(160));
+                for (int w = 0; w < 60 && std::abs(player.currentSeconds() - 1.5) >= 0.75; ++w) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                }
                 checkTrue(std::abs(player.currentSeconds() - 1.5) < 0.75, "Scrub to 1.5s out of tolerance");
 
                 BgraFrame scrubbedFrame;
@@ -382,9 +384,13 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
                 // Test 1x, 4x, and 12x playback speeds
                 for (float rate : {1.0f, 4.0f, 12.0f}) {
                     player.scrubToSeconds(0.0);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                    for (int w = 0; w < 40 && player.currentSeconds() > 0.25; ++w) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    }
                     player.play(rate);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(220));
+                    for (int w = 0; w < 50 && player.currentSeconds() <= 0.03 && player.isPlaying(); ++w) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    }
                     checkTrue(player.currentSeconds() > 0.03 || !player.isPlaying(), "Playback clock did not advance at speed " + std::to_string(rate));
                     player.pause();
                 }

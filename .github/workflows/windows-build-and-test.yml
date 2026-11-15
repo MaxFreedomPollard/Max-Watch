@@ -13,15 +13,22 @@ permissions:
 
 jobs:
   windows-build-and-verify:
-    name: Build & Verify Windows 10/11 (x64 + ARM64)
+    name: Build & Verify Windows x64 + ARM64
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Inno Setup 6 is installed
+      - name: Ensure Media Foundation & Inno Setup 6 are installed
         shell: pwsh
         run: |
+          if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+            $mf = Get-WindowsFeature -Name Server-Media-Foundation -ErrorAction SilentlyContinue
+            if ($mf -and -not $mf.Installed) {
+              Write-Host "Installing Server-Media-Foundation Windows feature..."
+              Install-WindowsFeature -Name Server-Media-Foundation | Out-Null
+            }
+          }
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (!(Test-Path $iscc)) {
             choco install innosetup --no-progress -y
@@ -36,7 +43,7 @@ jobs:
         shell: pwsh
         run: |
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsInstall = & $vsWhere -latest -property installationPath
+          $vsInstall = & $vsWhere -latest -products * -property installationPath | Select-Object -First 1
           $dumpbin = Get-ChildItem -Path $vsInstall -Recurse -Filter "dumpbin.exe" |
                      Where-Object { $_.FullName -match "Hostx64\\x64" } |
                      Select-Object -First 1 -ExpandProperty FullName
@@ -55,22 +62,29 @@ jobs:
           }
           Write-Host "PE Import Audit Passed: Zero network DLLs imported in x64 or ARM64!"
 
-      - name: Test Silent Installation & Installed Binary Execution
+      - name: Test Silent Installation & Post-Install x64 Execution
         shell: pwsh
         run: |
           $setupExe = Resolve-Path "Windows/build/dist/Max-Watch-*-Windows-Setup.exe"
-          $testInstallDir = Join-Path $env:RUNNER_TEMP "MaxWatchInstalledTest"
+          $testInstallDir = Join-Path $env:RUNNER_TEMP "MaxWatchInstalledTestX64"
           Start-Process -FilePath $setupExe.Path -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$testInstallDir`"" -Wait -NoNewWindow
           $installedExe = Join-Path $testInstallDir "MaxWatch.exe"
           if (!(Test-Path $installedExe)) {
             throw "Silent installer did not produce $installedExe"
           }
-          Write-Host "Running full 14-stage --selftest from installed MaxWatch.exe..."
-          & $installedExe --selftest (Join-Path $env:RUNNER_TEMP "InstalledSelfTestTmp")
+          $bytes = [System.IO.File]::ReadAllBytes($installedExe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          Write-Host ("Installed PE Machine Architecture on x64 host: 0x{0:X4}" -f $machine)
+          if ($machine -ne 0x8664) {
+            throw ("Expected native x64 PE machine 0x8664, got 0x{0:X4}" -f $machine)
+          }
+          Write-Host "Running full 14-stage --selftest from installed x64 MaxWatch.exe..."
+          & $installedExe --selftest (Join-Path $env:RUNNER_TEMP "InstalledSelfTestTmpX64")
           if ($LASTEXITCODE -ne 0) {
             throw "Installed MaxWatch.exe --selftest failed with exit code $LASTEXITCODE"
           }
-          Write-Host "Silent Installer + Post-Install Self-Test Passed 100%!"
+          Write-Host "Silent x64 Installer + Post-Install Self-Test Passed 100%!"
 
       - name: Upload Windows Release Binaries & Rendered UI Screenshots
         uses: actions/upload-artifact@v4
@@ -81,3 +95,55 @@ jobs:
             Windows/build/dist/SHA256SUMS-Windows.txt
             Windows/build/dist/screenshots/*.png
           if-no-files-found: error
+
+  windows-11-arm64-client-verify:
+    name: Verify Native ARM64 & Installer on Real Windows 11
+    needs: windows-build-and-verify
+    runs-on: windows-11-arm
+    steps:
+      - name: Download Built Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Max-Watch-Windows-Release-Artifacts
+          path: dist_arm_test
+
+      - name: Verify Portable ARM64 14-Stage SelfTest & Direct2D UI on Real Windows 11
+        shell: pwsh
+        run: |
+          $armPortable = Get-ChildItem -Path "dist_arm_test" -Recurse -Filter "Max-Watch-*-Windows-Portable-ARM64.exe" | Select-Object -First 1
+          if (-not $armPortable) { throw "Portable ARM64 exe not found in artifact" }
+          Write-Host "Running 14-stage --selftest on real Windows 11 ARM64 ($($armPortable.FullName))..."
+          & $armPortable.FullName --selftest (Join-Path $env:RUNNER_TEMP "Win11ArmSelfTest")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable ARM64 --selftest failed on Windows 11 ARM64 with exit code $LASTEXITCODE"
+          }
+          Write-Host "Running Direct2D Studio UI Smoke Test on real Windows 11 ARM64..."
+          & $armPortable.FullName --ui-smoke-test (Join-Path $env:RUNNER_TEMP "Win11ArmUiSmoke")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable ARM64 --ui-smoke-test failed on Windows 11 ARM64 with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify Universal Setup Installer Selects Native ARM64 on Real Windows 11
+        shell: pwsh
+        run: |
+          $setupExe = Get-ChildItem -Path "dist_arm_test" -Recurse -Filter "Max-Watch-*-Windows-Setup.exe" | Select-Object -First 1
+          if (-not $setupExe) { throw "Windows Setup exe not found in artifact" }
+          $installDir = Join-Path $env:RUNNER_TEMP "MaxWatchInstalledTestArm64"
+          Start-Process -FilePath $setupExe.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$installDir`"" -Wait -NoNewWindow
+          $installedExe = Join-Path $installDir "MaxWatch.exe"
+          if (!(Test-Path $installedExe)) {
+            throw "Silent installer did not produce $installedExe on Windows 11 ARM64"
+          }
+          $bytes = [System.IO.File]::ReadAllBytes($installedExe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          Write-Host ("Installed PE Machine Architecture on Windows 11 ARM64 host: 0x{0:X4}" -f $machine)
+          if ($machine -ne 0xAA64) {
+            throw ("Expected native ARM64 PE machine 0xAA64, got 0x{0:X4}" -f $machine)
+          }
+          Write-Host "Running full 14-stage --selftest from installed ARM64 MaxWatch.exe on Windows 11..."
+          & $installedExe --selftest (Join-Path $env:RUNNER_TEMP "InstalledSelfTestTmpArm64")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed ARM64 MaxWatch.exe --selftest failed with exit code $LASTEXITCODE"
+          }
+          Write-Host "Real Windows 11 ARM64 Portable + Universal Installer Verification Passed 100%!"
