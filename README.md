@@ -16,7 +16,7 @@ In a hotel? Leave this on when you're out and have the do not disturb sign on, i
 
 If you have a laptop, you now have a reliable security camera program that you can leave on whenever you want. Can't believe I'm the first person to make this, should have been made 10 years ago before AI even existed, but I'm the only good person on earth clearly.
 
-Note: This does not disable the light that shows when the camera is recording. If you want to do that, black nail polish or something. I decided not to blank the light because what works on one Mac might break another Mac, and this program is truly compatible with all Macs. Old, new, ARM, Intel, Silicone, whatever, if it's a Mac it should work on your computer. If you have any technical issues, just message me on instagram or linked and I will do a new release, usually same day. If you message on Github it might be lost, because I get 10-20 messages per day on Github.
+Note: This does not disable the light that shows when the camera is recording. If you want to do that, black nail polish or something. I decided not to blank the light because what works on one Mac might break another Mac, and this program is truly compatible with all Macs. Old, new, ARM, Intel, Silicone, whatever, if it's a Mac it should work on your computer. If you have any technical issues, just message me on instagram or linked and I will do a new release, usually same day. If you message on Github it might be lost, because I get 10-20 messages per day on Github. You can turn audio on or off, so it either records just video on motion, or records video and audio on motion
 
 ---
 
