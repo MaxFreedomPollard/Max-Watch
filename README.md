@@ -1,4 +1,4 @@
-# Max Watch | Offline Encrypted Security Cam Program, Works With Screen Locked
+# Max Watch | Offline Encrypted Security Cam on Screen Lock
 
 **A 100% offline, free, encrypted Mac video recorder with motion detection.**
 
