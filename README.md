@@ -1,5 +1,6 @@
 # Max Watch | Free Mac Security Cam. 
-## Encrypted. Offline. Works on Screen Lock. Motion Detect. Password Protected. No setup required.
+## Encrypted. Offline. Works on Screen Lock. Motion Detect. Password Protected. 
+## Actually free, no upgrade possible. Works out of the box, no setup.
 
 **A 100% offline, free, encrypted Mac video recorder with motion detection.**
 
