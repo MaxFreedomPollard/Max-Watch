@@ -428,7 +428,7 @@ std::vector<uint8_t> Fmp4SegmentMuxer::buildInitSegmentBytes() const {
                                 w16(out, 0xFFFF);
                                 {
                                     BoxScope avcC(out, "avcC");
-                                    uint8_t profile = sps_.size() > 1 ? sps_[1] : 0x64;
+                                    uint8_t profile = sps_.size() > 1 ? sps_[1] : 0x4D;
                                     uint8_t compat  = sps_.size() > 2 ? sps_[2] : 0x00;
                                     uint8_t level   = sps_.size() > 3 ? sps_[3] : 0x28;
                                     w8(out, 1);       // configurationVersion
@@ -442,6 +442,12 @@ std::vector<uint8_t> Fmp4SegmentMuxer::buildInitSegmentBytes() const {
                                     w8(out, 1);       // 1 PPS
                                     w16(out, static_cast<uint16_t>(pps_.size()));
                                     out.insert(out.end(), pps_.begin(), pps_.end());
+                                    if (profile == 100 || profile == 110 || profile == 122 || profile == 144) {
+                                        w8(out, 0xFD); // 4:2:0 chroma_format
+                                        w8(out, 0xF8); // 8-bit luma
+                                        w8(out, 0xF8); // 8-bit chroma
+                                        w8(out, 0x00); // 0 SPS Ext
+                                    }
                                     avcC.finish();
                                 }
                                 avc1.finish();
@@ -894,6 +900,18 @@ void writeStszFromSizes(std::vector<uint8_t>& stbl, const std::vector<uint32_t>&
     stsz.finish();
 }
 
+size_t writeStcoPlaceholder(std::vector<uint8_t>& stbl, const std::vector<uint64_t>& mediaOffsets) {
+    BoxScope stco(stbl, "stco");
+    w32(stbl, 0);
+    w32(stbl, static_cast<uint32_t>(mediaOffsets.size()));
+    size_t entriesStart = stbl.size();
+    for (uint64_t off : mediaOffsets) {
+        w32(stbl, static_cast<uint32_t>(off & 0xFFFFFFFFULL));
+    }
+    stco.finish();
+    return entriesStart;
+}
+
 size_t writeCo64Placeholder(std::vector<uint8_t>& stbl, const std::vector<uint64_t>& mediaOffsets) {
     BoxScope co64(stbl, "co64");
     w32(stbl, 0);
@@ -1246,8 +1264,9 @@ VirtualStandardMp4Layout buildVirtualStandardMp4Layout(
         ftyp.finish();
     }
 
-    size_t vidCo64EntriesPos = 0;
-    size_t audCo64EntriesPos = 0;
+    const bool use64BitOffsets = (fragOffsetInMedia >= 0x70000000ULL);
+    size_t vidChunkEntriesPos = 0;
+    size_t audChunkEntriesPos = 0;
 
     // moov
     {
@@ -1367,7 +1386,9 @@ VirtualStandardMp4Layout buildVirtualStandardMp4Layout(
                         writeStssBox(hdr, vidTrack.syncSamples1Based);
                         writeStscFromChunkCounts(hdr, vidTrack.chunkSampleCounts);
                         writeStszFromSizes(hdr, vidTrack.sampleSizes);
-                        vidCo64EntriesPos = writeCo64Placeholder(hdr, vidTrack.chunkOffsetsInMedia);
+                        vidChunkEntriesPos = use64BitOffsets
+                            ? writeCo64Placeholder(hdr, vidTrack.chunkOffsetsInMedia)
+                            : writeStcoPlaceholder(hdr, vidTrack.chunkOffsetsInMedia);
                         stbl.finish();
                     }
                     minf.finish();
@@ -1458,7 +1479,9 @@ VirtualStandardMp4Layout buildVirtualStandardMp4Layout(
                         writeSttsFromDurations(hdr, audTrack.sampleDurations);
                         writeStscFromChunkCounts(hdr, audTrack.chunkSampleCounts);
                         writeStszFromSizes(hdr, audTrack.sampleSizes);
-                        audCo64EntriesPos = writeCo64Placeholder(hdr, audTrack.chunkOffsetsInMedia);
+                        audChunkEntriesPos = use64BitOffsets
+                            ? writeCo64Placeholder(hdr, audTrack.chunkOffsetsInMedia)
+                            : writeStcoPlaceholder(hdr, audTrack.chunkOffsetsInMedia);
                         stbl.finish();
                     }
                     minf.finish();
@@ -1471,14 +1494,36 @@ VirtualStandardMp4Layout buildVirtualStandardMp4Layout(
         moov.finish();
     }
 
-    // 4. Patch exact 64-bit file offsets into `co64` now that `hdr.size()` is finalized!
+    // 4. Emit ONE unified top-level `mdat` box header spanning 100% of `fragOffsetInMedia`
+    //    so strict demuxers (Windows Media Foundation `mfmp4srcsnk.dll`, QuickTime, VLC)
+    //    see a textbook [ftyp][moov][mdat] unfragmented MP4 layout!
+    if (8ULL + fragOffsetInMedia <= 0xFFFFFFFFULL && !use64BitOffsets) {
+        w32(hdr, static_cast<uint32_t>(8ULL + fragOffsetInMedia));
+        wFourCC(hdr, "mdat");
+    } else {
+        w32(hdr, 1); // 64-bit ISO BMFF largesize box
+        wFourCC(hdr, "mdat");
+        w64(hdr, 16ULL + fragOffsetInMedia);
+    }
+
+    // 5. Patch exact file offsets into `stco` / `co64` now that `hdr.size()` (including `mdat` header) is finalized!
     uint64_t finalHdrSize = static_cast<uint64_t>(hdr.size());
     for (size_t i = 0; i < vidTrack.chunkOffsetsInMedia.size(); ++i) {
-        patch64be(hdr, vidCo64EntriesPos + i * 8, finalHdrSize + vidTrack.chunkOffsetsInMedia[i]);
+        uint64_t absOff = finalHdrSize + vidTrack.chunkOffsetsInMedia[i];
+        if (use64BitOffsets) {
+            patch64be(hdr, vidChunkEntriesPos + i * 8, absOff);
+        } else {
+            patch32(hdr, vidChunkEntriesPos + i * 4, static_cast<uint32_t>(absOff));
+        }
     }
     if (includeAudio) {
         for (size_t i = 0; i < audTrack.chunkOffsetsInMedia.size(); ++i) {
-            patch64be(hdr, audCo64EntriesPos + i * 8, finalHdrSize + audTrack.chunkOffsetsInMedia[i]);
+            uint64_t absOff = finalHdrSize + audTrack.chunkOffsetsInMedia[i];
+            if (use64BitOffsets) {
+                patch64be(hdr, audChunkEntriesPos + i * 8, absOff);
+            } else {
+                patch32(hdr, audChunkEntriesPos + i * 4, static_cast<uint32_t>(absOff));
+            }
         }
     }
 

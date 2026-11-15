@@ -483,7 +483,9 @@ ComPtr<IMFTransform> createSyncH264EncoderMFT(int width, int height, std::vector
 
     // Configure low-latency, zero-B-frame, 8-frame keyframe GOP via ICodecAPI
     ComPtr<ICodecAPI> codecApi;
-    if (SUCCEEDED(mft.As(&codecApi)) && codecApi) {
+    mft.As(&codecApi);
+    auto applyLowLatencyGop = [&]() {
+        if (!codecApi) return;
         VARIANT vGop{};
         vGop.vt = VT_UI4;
         vGop.ulVal = 8; // Keyframe every ~0.26s for zero-lag fast ball scrubbing!
@@ -498,14 +500,15 @@ ComPtr<IMFTransform> createSyncH264EncoderMFT(int width, int height, std::vector
         vLowLat.vt = VT_BOOL;
         vLowLat.boolVal = VARIANT_TRUE;
         codecApi->SetValue(&CODECAPI_AVLowLatencyMode, &vLowLat);
-    }
+    };
+    applyLowLatencyGop();
 
     double scale = std::clamp(static_cast<double>(width * height) / (1920.0 * 1080.0), 0.30, 1.50);
     UINT32 bitrate = static_cast<UINT32>(12000000.0 * scale);
 
     // IMPORTANT: Microsoft H.264 Encoder MFT requires SetOutputType BEFORE SetInputType!
     bool outConfigured = false;
-    const UINT32 profiles[3] = {eAVEncH264VProfile_High, eAVEncH264VProfile_Main, eAVEncH264VProfile_Base};
+    const UINT32 profiles[3] = {eAVEncH264VProfile_Main, eAVEncH264VProfile_High, eAVEncH264VProfile_Base};
     for (UINT32 prof : profiles) {
         ComPtr<IMFMediaType> mtOut;
         MFCreateMediaType(&mtOut);
@@ -535,6 +538,10 @@ ComPtr<IMFTransform> createSyncH264EncoderMFT(int width, int height, std::vector
     if (FAILED(mft->SetInputType(0, mtIn.Get(), 0))) {
         return nullptr;
     }
+
+    // Re-apply GOP & zero-B-frame properties AFTER SetOutputType + SetInputType because
+    // Microsoft's software h264enc.dll resets GOPSize back to default during media type negotiation!
+    applyLowLatencyGop();
 
     // Extract MF_MT_MPEG_SEQUENCE_HEADER if already available
     ComPtr<IMFMediaType> curOut;
@@ -1726,10 +1733,10 @@ bool VaultPlayerEngine::loadClip(std::shared_ptr<VaultClipReader> reader, std::s
 
     playerThread_ = std::thread(&VaultPlayerEngine::playerWorkerLoop, this, std::move(reader));
 
-    // Wait up to 1.5s for the initial frame at t = 0.0 to be decoded into RAM so callers see an immediate frame
+    // Wait up to 4.0s for the initial frame at t = 0.0 to be decoded into RAM so callers see an immediate frame
     {
         std::unique_lock<std::mutex> lock(wakeMutex_);
-        wakeCv_.wait_for(lock, std::chrono::milliseconds(1500), [this]() {
+        wakeCv_.wait_for(lock, std::chrono::milliseconds(4000), [this]() {
             return initialFrameReady_.load() || workerStop_.load();
         });
     }
@@ -1815,20 +1822,33 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
         return;
     }
 
-    UINT32 vidW = static_cast<UINT32>(std::max(16, static_cast<int>(reader->header().width)));
-    UINT32 vidH = static_cast<UINT32>(std::max(16, static_cast<int>(reader->header().height)));
+    const UINT32 headerW = static_cast<UINT32>(std::max(16, static_cast<int>(reader->header().width)));
+    const UINT32 headerH = static_cast<UINT32>(std::max(16, static_cast<int>(reader->header().height)));
+    UINT32 surfW = headerW;
+    UINT32 surfH = headerH;
     INT32 vidStride = 0;
-    {
+
+    auto refreshVideoOutputFormat = [&]() {
         ComPtr<IMFMediaType> curVid;
         if (SUCCEEDED(sr->GetCurrentMediaType(kMfFirstVideoStream, &curVid)) && curVid) {
-            MFGetAttributeSize(curVid.Get(), MF_MT_FRAME_SIZE, &vidW, &vidH);
+            UINT32 w = 0, h = 0;
+            if (SUCCEEDED(MFGetAttributeSize(curVid.Get(), MF_MT_FRAME_SIZE, &w, &h)) && w > 0 && h > 0) {
+                surfW = w;
+                surfH = h;
+            }
             UINT32 rawStride = 0;
-            if (SUCCEEDED(curVid->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride))) {
+            if (SUCCEEDED(curVid->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride)) && rawStride != 0) {
                 vidStride = static_cast<INT32>(rawStride);
+            } else {
+                LONG calcStride = 0;
+                if (SUCCEEDED(MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1, surfW, &calcStride)) && calcStride != 0) {
+                    vidStride = static_cast<INT32>(calcStride);
+                }
             }
         }
-    }
-    if (vidStride == 0) vidStride = static_cast<INT32>(vidW * 4);
+        if (vidStride == 0) vidStride = static_cast<INT32>(surfW * 4);
+    };
+    refreshVideoOutputFormat();
 
     // Optional Audio Stream + WASAPI Audio Render Client
     bool hasAudioStream = false;
@@ -1888,6 +1908,10 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
                 }
             }
         }
+        if (!renderClient) {
+            sr->SetStreamSelection(kMfFirstAudioStream, FALSE);
+            hasAudioStream = false;
+        }
     }
 
     auto publishVideoSample = [&](IMFSample* smp, LONGLONG ts100ns) {
@@ -1897,24 +1921,26 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
         DWORD cb = 0;
         if (FAILED(buf->Lock(&raw, nullptr, &cb)) || !raw) return;
 
-        int w = static_cast<int>(vidW);
-        int h = static_cast<int>(vidH);
+        int fullW = static_cast<int>(surfW);
+        int fullH = static_cast<int>(surfH);
+        int outW = std::min(fullW, static_cast<int>(headerW));
+        int outH = std::min(fullH, static_cast<int>(headerH));
         int pitch = vidStride;
         int absPitch = std::abs(pitch);
-        if (cb >= static_cast<DWORD>(absPitch * h)) {
-            std::vector<uint8_t> pixels(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
-            const uint8_t* top = (pitch < 0) ? (raw + absPitch * (h - 1)) : raw;
-            for (int r = 0; r < h; ++r) {
+        if (outW > 0 && outH > 0 && cb >= static_cast<DWORD>(absPitch * fullH)) {
+            std::vector<uint8_t> pixels(static_cast<size_t>(outW) * static_cast<size_t>(outH) * 4);
+            const uint8_t* top = (pitch < 0) ? (raw + absPitch * (fullH - 1)) : raw;
+            for (int r = 0; r < outH; ++r) {
                 const uint8_t* srcRow = top + r * pitch;
-                uint8_t* dstRow = pixels.data() + r * w * 4;
-                std::memcpy(dstRow, srcRow, w * 4);
-                for (int x = 0; x < w; ++x) dstRow[x * 4 + 3] = 255;
+                uint8_t* dstRow = pixels.data() + r * outW * 4;
+                std::memcpy(dstRow, srcRow, static_cast<size_t>(outW) * 4);
+                for (int x = 0; x < outW; ++x) dstRow[x * 4 + 3] = 255;
             }
             double sec = std::max(0.0, static_cast<double>(ts100ns) / 10000000.0);
             {
                 std::lock_guard<std::mutex> fLock(frameMutex_);
-                currentFrame_.width = w;
-                currentFrame_.height = h;
+                currentFrame_.width = outW;
+                currentFrame_.height = outH;
                 currentFrame_.ptsSeconds = sec;
                 currentFrame_.sequence = ++frameSeq_;
                 currentFrame_.pixels = std::move(pixels);
@@ -1938,16 +1964,20 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
         sr->SetCurrentPosition(GUID_NULL, pv);
         PropVariantClear(&pv);
 
-        // Decode forward from nearest preceding keyframe (at most 8 frames away!) right up to target100ns
+        // Decode forward from nearest preceding keyframe right up to target100ns
         ComPtr<IMFSample> bestSample;
         LONGLONG bestTs = target100ns;
-        for (int step = 0; step < 24; ++step) {
+        for (int step = 0; step < 90; ++step) {
             if (hasPendingScrub_.load()) break; // Newer drag target arrived -> chase newer target immediately!
             DWORD sIdx = 0, flags = 0;
             LONGLONG ts = 0;
             ComPtr<IMFSample> smp;
             HRESULT hr = sr->ReadSample(kMfFirstVideoStream, 0, &sIdx, &flags, &ts, &smp);
-            if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) break;
+            if (FAILED(hr)) break;
+            if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+                refreshVideoOutputFormat();
+            }
+            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
             if (!smp) continue;
             bestSample = smp;
             bestTs = ts;
@@ -1990,15 +2020,17 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
             clockAnchored = true;
         }
 
-        // At 12x speed, skip directly along keyframes/targets if reader falls behind real-time 12x shuttle
         DWORD streamIdx = 0, flags = 0;
         LONGLONG ts100ns = 0;
         ComPtr<IMFSample> sample;
-        DWORD streamToRead = (hasAudioStream && spd <= 4.0f && !isMuted_.load())
+        DWORD streamToRead = (hasAudioStream && renderClient && spd <= 4.0f && !isMuted_.load())
             ? static_cast<DWORD>(MF_SOURCE_READER_ANY_STREAM)
             : static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 
         HRESULT hr = sr->ReadSample(streamToRead, 0, &streamIdx, &flags, &ts100ns, &sample);
+        if (SUCCEEDED(hr) && (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) && streamIdx == 0) {
+            refreshVideoOutputFormat();
+        }
         if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
             isPlaying_.store(false);
             clockAnchored = false;

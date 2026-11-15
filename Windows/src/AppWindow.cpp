@@ -2602,9 +2602,9 @@ void AppWindow::runSmokeTestStep() {
             loadAndPlayClip(0, false);
             player_.scrubToSeconds(1.2);
         }
-    } else if (smokeTickCounter_ == 50) {
+    } else if (smokeTickCounter_ == 54) {
         saveCurrentSceneToPng((outDir / L"windows_vault_player.png").wstring(), 1300, 800);
-    } else if (smokeTickCounter_ >= 53) {
+    } else if (smokeTickCounter_ >= 57) {
         quitApplicationCleanly();
     }
 }

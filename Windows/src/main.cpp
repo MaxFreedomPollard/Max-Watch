@@ -12,48 +12,96 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <objbase.h>
-#include <fcntl.h>
-#include <io.h>
 
-#include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <streambuf>
 #include <string>
 #include <vector>
 
 namespace {
 
+class Win32HandleStreambuf final : public std::streambuf {
+public:
+    void setHandle(HANDLE h) { h_ = h; }
+
+protected:
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        if (!h_ || h_ == INVALID_HANDLE_VALUE || !s || n <= 0) return n;
+        std::streamsize rem = n;
+        const char* p = s;
+        while (rem > 0) {
+            DWORD chunk = static_cast<DWORD>(rem > 65536 ? 65536 : rem);
+            DWORD written = 0;
+            if (!WriteFile(h_, p, chunk, &written, nullptr) || written == 0) {
+                break;
+            }
+            p += written;
+            rem -= static_cast<std::streamsize>(written);
+        }
+        return n - rem;
+    }
+
+    int_type overflow(int_type ch) override {
+        if (ch == traits_type::eof()) return traits_type::not_eof(ch);
+        char c = static_cast<char>(ch);
+        return (xsputn(&c, 1) == 1) ? ch : traits_type::eof();
+    }
+
+    int sync() override {
+        if (h_ && h_ != INVALID_HANDLE_VALUE) {
+            FlushFileBuffers(h_);
+        }
+        return 0;
+    }
+
+private:
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+};
+
 void bindWin32StdHandlesForCli() {
-    auto bindOne = [](DWORD stdHandleId, FILE* targetStream, const char* conFile) {
+    static Win32HandleStreambuf sOutBuf;
+    static Win32HandleStreambuf sErrBuf;
+    static bool sBound = false;
+    if (sBound) return;
+    sBound = true;
+
+    auto resolveHandle = [](DWORD stdHandleId) -> HANDLE {
         HANDLE h = GetStdHandle(stdHandleId);
         DWORD ftype = (h && h != INVALID_HANDLE_VALUE) ? GetFileType(h) : FILE_TYPE_UNKNOWN;
         if (ftype == FILE_TYPE_PIPE || ftype == FILE_TYPE_DISK || ftype == FILE_TYPE_CHAR) {
-            FILE* nulDummy = nullptr;
-            freopen_s(&nulDummy, "nul", "w", targetStream);
-            int osf = _open_osfhandle(reinterpret_cast<intptr_t>(h), _O_TEXT);
-            if (osf != -1) {
-                FILE* wrapped = _fdopen(osf, "w");
-                if (wrapped) {
-                    _dup2(_fileno(wrapped), _fileno(targetStream));
-                    setvbuf(targetStream, nullptr, _IONBF, 0);
-                    return;
-                }
-            }
+            return h;
         }
-        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-            FILE* dummy = nullptr;
-            freopen_s(&dummy, conFile, "w", targetStream);
-            setvbuf(targetStream, nullptr, _IONBF, 0);
+        if (AttachConsole(ATTACH_PARENT_PROCESS) || GetConsoleWindow() != nullptr) {
+            HANDLE con = CreateFileW(
+                L"CONOUT$",
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr
+            );
+            if (con != INVALID_HANDLE_VALUE) return con;
         }
+        return INVALID_HANDLE_VALUE;
     };
 
-    bindOne(STD_OUTPUT_HANDLE, stdout, "CONOUT$");
-    bindOne(STD_ERROR_HANDLE, stderr, "CONOUT$");
-    std::cout.clear();
-    std::cerr.clear();
-    std::wcout.clear();
-    std::wcerr.clear();
-    std::ios::sync_with_stdio(true);
+    HANDLE hOut = resolveHandle(STD_OUTPUT_HANDLE);
+    HANDLE hErr = resolveHandle(STD_ERROR_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        sOutBuf.setHandle(hOut);
+        std::cout.rdbuf(&sOutBuf);
+        std::cout.clear();
+    }
+    if (hErr != INVALID_HANDLE_VALUE) {
+        sErrBuf.setHandle(hErr);
+        std::cerr.rdbuf(&sErrBuf);
+        std::cerr.clear();
+    } else if (hOut != INVALID_HANDLE_VALUE) {
+        std::cerr.rdbuf(&sOutBuf);
+        std::cerr.clear();
+    }
 }
 
 } // namespace

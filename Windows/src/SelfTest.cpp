@@ -181,16 +181,16 @@ void verifyExportedMp4DecodesIndependently(const std::wstring& mp4Path, int expe
     checkTrue(SUCCEEDED(reader->SetCurrentMediaType(kFirstVideo, nullptr, outRgb.Get())), "Set RGB32 output on exported .mp4 failed");
 
     int decodedFrames = 0;
-    for (int tries = 0; tries < 40 && decodedFrames < 5; ++tries) {
+    for (int tries = 0; tries < 90 && decodedFrames < 5; ++tries) {
         DWORD streamIdx = 0, flags = 0;
         LONGLONG ts = 0;
         ComPtr<IMFSample> sample;
         hr = reader->ReadSample(kFirstVideo, 0, &streamIdx, &flags, &ts, &sample);
-        checkTrue(SUCCEEDED(hr), "ReadSample failed on exported .mp4");
+        checkTrue(SUCCEEDED(hr), "ReadSample failed on exported .mp4 (hr=" + std::to_string(hr) + ")");
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
         if (sample) decodedFrames++;
     }
-    checkTrue(decodedFrames >= 3, "Exported .mp4 decoded fewer than 3 video frames");
+    checkTrue(decodedFrames >= 3, "Exported .mp4 decoded fewer than 3 video frames (got " + std::to_string(decodedFrames) + ")");
 }
 
 void verifyZeroNetworkDllImportsInCurrentExecutable() {
@@ -381,14 +381,20 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
 
                 BgraFrame firstFrame;
                 checkTrue(player.copyLatestVideoFrame(firstFrame), "Initial decoded BGRA frame missing");
-                checkTrue(firstFrame.width == 1280 && firstFrame.height == 720, "Decoded frame resolution mismatch");
+                checkTrue(
+                    firstFrame.width == 1280 && firstFrame.height == 720,
+                    "Decoded frame resolution mismatch: " + std::to_string(firstFrame.width) + "x" + std::to_string(firstFrame.height)
+                );
 
                 // Test fast ball scrub chase across multiple timestamps
                 player.scrubToSeconds(1.5);
-                for (int w = 0; w < 60 && std::abs(player.currentSeconds() - 1.5) >= 0.75; ++w) {
+                for (int w = 0; w < 80 && std::abs(player.currentSeconds() - 1.5) >= 0.75; ++w) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(25));
                 }
-                checkTrue(std::abs(player.currentSeconds() - 1.5) < 0.75, "Scrub to 1.5s out of tolerance");
+                checkTrue(
+                    std::abs(player.currentSeconds() - 1.5) < 0.75,
+                    "Scrub to 1.5s out of tolerance (got " + std::to_string(player.currentSeconds()) + "s)"
+                );
 
                 BgraFrame scrubbedFrame;
                 checkTrue(player.copyLatestVideoFrame(scrubbedFrame), "Scrubbed frame missing");

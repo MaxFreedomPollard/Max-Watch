@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -2061,7 +2062,7 @@ void VaultManager::secureDeleteClip(const std::wstring& clipPath) {
         HANDLE h = CreateFileW(
             clipPath.c_str(),
             GENERIC_WRITE,
-            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
@@ -2082,7 +2083,16 @@ void VaultManager::secureDeleteClip(const std::wstring& clipPath) {
         }
 #endif
     }
-    if (!fs::remove(fs::path(clipPath), ec)) {
+    bool removed = false;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        ec.clear();
+        if (fs::remove(fs::path(clipPath), ec) || !fs::exists(fs::path(clipPath), ec)) {
+            removed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    if (!removed) {
         throw VaultException(VaultErrorKind::IoFailure, "Failed to delete vault clip.");
     }
 }
