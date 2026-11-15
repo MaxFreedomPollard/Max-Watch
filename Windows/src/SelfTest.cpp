@@ -23,7 +23,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -43,12 +45,16 @@ void checkTrue(bool cond, const std::string& msg) {
 }
 
 std::vector<uint8_t> hexToBytes(const char* hex) {
+    auto hexNib = [](char c) -> uint8_t {
+        if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+        if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(10 + (c - 'a'));
+        if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(10 + (c - 'A'));
+        return 0;
+    };
     std::vector<uint8_t> out;
     size_t len = std::strlen(hex);
     for (size_t i = 0; i + 1 < len; i += 2) {
-        unsigned int byteVal = 0;
-        std::sscanf(hex + i, "%2x", &byteVal);
-        out.push_back(static_cast<uint8_t>(byteVal));
+        out.push_back(static_cast<uint8_t>((hexNib(hex[i]) << 4) | hexNib(hex[i + 1])));
     }
     return out;
 }
@@ -151,8 +157,11 @@ void verifyExportedMp4DecodesIndependently(const std::wstring& mp4Path, int expe
     hr = MFCreateSourceReaderFromURL(mp4Path.c_str(), attrs.Get(), &reader);
     checkTrue(SUCCEEDED(hr) && reader != nullptr, "MFCreateSourceReaderFromURL failed to open exported .mp4");
 
+    constexpr DWORD kFirstVideo = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+    constexpr DWORD kFirstAudio = static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+
     ComPtr<IMFMediaType> nativeVideo;
-    hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nativeVideo);
+    hr = reader->GetNativeMediaType(kFirstVideo, 0, &nativeVideo);
     checkTrue(SUCCEEDED(hr) && nativeVideo != nullptr, "Exported .mp4 missing video stream");
 
     UINT32 w = 0, h = 0;
@@ -160,7 +169,7 @@ void verifyExportedMp4DecodesIndependently(const std::wstring& mp4Path, int expe
     checkTrue(static_cast<int>(w) == expectedW && static_cast<int>(h) == expectedH, "Exported .mp4 video dimensions mismatch");
 
     ComPtr<IMFMediaType> nativeAudio;
-    HRESULT hrAudio = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &nativeAudio);
+    HRESULT hrAudio = reader->GetNativeMediaType(kFirstAudio, 0, &nativeAudio);
     if (expectAudio) {
         checkTrue(SUCCEEDED(hrAudio) && nativeAudio != nullptr, "Exported .mp4 missing expected AAC audio stream");
     }
@@ -169,14 +178,14 @@ void verifyExportedMp4DecodesIndependently(const std::wstring& mp4Path, int expe
     MFCreateMediaType(&outRgb);
     outRgb->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     outRgb->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-    checkTrue(SUCCEEDED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, outRgb.Get())), "Set RGB32 output on exported .mp4 failed");
+    checkTrue(SUCCEEDED(reader->SetCurrentMediaType(kFirstVideo, nullptr, outRgb.Get())), "Set RGB32 output on exported .mp4 failed");
 
     int decodedFrames = 0;
     for (int tries = 0; tries < 40 && decodedFrames < 5; ++tries) {
         DWORD streamIdx = 0, flags = 0;
         LONGLONG ts = 0;
         ComPtr<IMFSample> sample;
-        hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIdx, &flags, &ts, &sample);
+        hr = reader->ReadSample(kFirstVideo, 0, &streamIdx, &flags, &ts, &sample);
         checkTrue(SUCCEEDED(hr), "ReadSample failed on exported .mp4");
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
         if (sample) decodedFrames++;

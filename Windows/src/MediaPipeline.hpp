@@ -191,6 +191,7 @@ public:
     float latestAudioDb() const { return latestAudioDb_.load(); }
 
     MotionDetector& motionDetector() { return motionDetector_; }
+    const MotionDetector& motionDetector() const { return motionDetector_; }
 
     void attachActiveSegmentWriter(std::shared_ptr<VaultSegmentWriter> writer);
     std::shared_ptr<VaultSegmentWriter> detachActiveSegmentWriter();

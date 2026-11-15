@@ -9,7 +9,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -231,6 +233,11 @@ struct ScopedComThread {
     }
 };
 
+constexpr DWORD kMfFirstVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+constexpr DWORD kMfFirstAudioStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+constexpr DWORD kMfAllStreams       = static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
+constexpr DWORD kMfMediaSource      = static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE);
+
 // Zero-Disk-Plaintext COM IMFByteStream + IMFAttributes backed purely by VaultClipReader in RAM!
 class VaultMemoryByteStream final : public IMFByteStream, public IMFAttributes {
 public:
@@ -238,8 +245,8 @@ public:
         : refCount_(1), reader_(std::move(reader)), pos_(0) {
         MFCreateAttributes(&attrs_, 4);
         if (attrs_) {
-            attrs_->SetString(MFBYTESTREAM_CONTENT_TYPE, L"video/mp4");
-            attrs_->SetString(MFBYTESTREAM_ORIGIN_NAME, L"vault_clip.mp4");
+            attrs_->SetString(MF_BYTESTREAM_CONTENT_TYPE, L"video/mp4");
+            attrs_->SetString(MF_BYTESTREAM_ORIGIN_NAME, L"vault_clip.mp4");
         }
     }
 
@@ -1362,7 +1369,7 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
     bool foundNative = false;
     for (DWORD idx = 0;; ++idx) {
         ComPtr<IMFMediaType> nativeMt;
-        if (FAILED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx, &nativeMt)) || !nativeMt) {
+        if (FAILED(reader->GetNativeMediaType(kMfFirstVideoStream, idx, &nativeMt)) || !nativeMt) {
             break;
         }
         UINT32 w = 0, h = 0, fpsNum = 30, fpsDen = 1;
@@ -1380,8 +1387,8 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
     }
     if (foundNative) {
         ComPtr<IMFMediaType> bestMt;
-        if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, bestNativeIdx, &bestMt))) {
-            reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, bestMt.Get());
+        if (SUCCEEDED(reader->GetNativeMediaType(kMfFirstVideoStream, bestNativeIdx, &bestMt))) {
+            reader->SetCurrentMediaType(kMfFirstVideoStream, nullptr, bestMt.Get());
         }
     }
 
@@ -1392,14 +1399,14 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
         MFCreateMediaType(&reqNv12);
         reqNv12->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         reqNv12->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-        if (SUCCEEDED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, reqNv12.Get()))) {
+        if (SUCCEEDED(reader->SetCurrentMediaType(kMfFirstVideoStream, nullptr, reqNv12.Get()))) {
             outputIsNV12 = true;
         } else {
             ComPtr<IMFMediaType> reqRgb;
             MFCreateMediaType(&reqRgb);
             reqRgb->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             reqRgb->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-            if (FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, reqRgb.Get()))) {
+            if (FAILED(reader->SetCurrentMediaType(kMfFirstVideoStream, nullptr, reqRgb.Get()))) {
                 mediaSource->Shutdown();
                 cameraActive_.store(false);
                 return;
@@ -1411,7 +1418,7 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
     INT32 defaultStride = 0;
     {
         ComPtr<IMFMediaType> curMt;
-        if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &curMt)) && curMt) {
+        if (SUCCEEDED(reader->GetCurrentMediaType(kMfFirstVideoStream, &curMt)) && curMt) {
             MFGetAttributeSize(curMt.Get(), MF_MT_FRAME_SIZE, &actualW, &actualH);
             UINT32 rawStride = 0;
             if (SUCCEEDED(curMt->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride))) {
@@ -1449,7 +1456,7 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
         LONGLONG llTimestamp = 0;
         ComPtr<IMFSample> sample;
         HRESULT hr = reader->ReadSample(
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            kMfFirstVideoStream,
             0,
             &streamIdx,
             &flags,
@@ -1694,7 +1701,7 @@ bool VaultPlayerEngine::loadClip(std::shared_ptr<VaultClipReader> reader, std::s
     double dur = std::max(0.2, static_cast<double>(reader->header().durationMs) / 1000.0);
     PROPVARIANT pvDur;
     PropVariantInit(&pvDur);
-    if (SUCCEEDED(sr->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &pvDur))) {
+    if (SUCCEEDED(sr->GetPresentationAttribute(kMfMediaSource, MF_PD_DURATION, &pvDur))) {
         if (pvDur.vt == VT_UI8 && pvDur.uhVal.QuadPart > 0) {
             double mfDur = static_cast<double>(pvDur.uhVal.QuadPart) / 10000000.0;
             if (mfDur > 0.05) dur = mfDur;
@@ -1796,14 +1803,14 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
         return;
     }
 
-    sr->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    sr->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+    sr->SetStreamSelection(kMfAllStreams, FALSE);
+    sr->SetStreamSelection(kMfFirstVideoStream, TRUE);
 
     ComPtr<IMFMediaType> vidOut;
     MFCreateMediaType(&vidOut);
     vidOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     vidOut->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-    if (FAILED(sr->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, vidOut.Get()))) {
+    if (FAILED(sr->SetCurrentMediaType(kMfFirstVideoStream, nullptr, vidOut.Get()))) {
         return;
     }
 
@@ -1812,7 +1819,7 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
     INT32 vidStride = 0;
     {
         ComPtr<IMFMediaType> curVid;
-        if (SUCCEEDED(sr->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &curVid)) && curVid) {
+        if (SUCCEEDED(sr->GetCurrentMediaType(kMfFirstVideoStream, &curVid)) && curVid) {
             MFGetAttributeSize(curVid.Get(), MF_MT_FRAME_SIZE, &vidW, &vidH);
             UINT32 rawStride = 0;
             if (SUCCEEDED(curVid->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride))) {
@@ -1826,7 +1833,7 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
     bool hasAudioStream = false;
     UINT32 audioChannels = 1;
     if (reader->header().hasAudio()) {
-        if (SUCCEEDED(sr->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE))) {
+        if (SUCCEEDED(sr->SetStreamSelection(kMfFirstAudioStream, TRUE))) {
             ComPtr<IMFMediaType> audOut;
             MFCreateMediaType(&audOut);
             audOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -1836,18 +1843,18 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
             audOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1);
             audOut->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 2);
             audOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 96000);
-            if (SUCCEEDED(sr->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, audOut.Get()))) {
+            if (SUCCEEDED(sr->SetCurrentMediaType(kMfFirstAudioStream, nullptr, audOut.Get()))) {
                 hasAudioStream = true;
                 audioChannels = 1;
             } else {
                 audOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
                 audOut->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
                 audOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000);
-                if (SUCCEEDED(sr->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, audOut.Get()))) {
+                if (SUCCEEDED(sr->SetCurrentMediaType(kMfFirstAudioStream, nullptr, audOut.Get()))) {
                     hasAudioStream = true;
                     audioChannels = 2;
                 } else {
-                    sr->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, FALSE);
+                    sr->SetStreamSelection(kMfFirstAudioStream, FALSE);
                 }
             }
         }
@@ -1926,7 +1933,7 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
         PropVariantInit(&pv);
         pv.vt = VT_I8;
         pv.hVal.QuadPart = target100ns;
-        sr->Flush(MF_SOURCE_READER_ALL_STREAMS);
+        sr->Flush(kMfAllStreams);
         sr->SetCurrentPosition(GUID_NULL, pv);
         PropVariantClear(&pv);
 
@@ -1938,7 +1945,7 @@ void VaultPlayerEngine::playerWorkerLoop(std::shared_ptr<VaultClipReader> reader
             DWORD sIdx = 0, flags = 0;
             LONGLONG ts = 0;
             ComPtr<IMFSample> smp;
-            HRESULT hr = sr->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &sIdx, &flags, &ts, &smp);
+            HRESULT hr = sr->ReadSample(kMfFirstVideoStream, 0, &sIdx, &flags, &ts, &smp);
             if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) break;
             if (!smp) continue;
             bestSample = smp;

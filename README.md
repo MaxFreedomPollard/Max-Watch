@@ -96,7 +96,7 @@ cd Max-Watch
 
 `./scripts/build_universal.sh` generates the icon asset catalog, compiles native `arm64` and `x86_64` binaries, merges them into a universal `Max Watch.app`, and runs the automated cryptographic, locked-while-saving, power-cut recovery, external `.mp4` export, and `1x` / `4x` / `12x` playback self-test suite.
 
-### Windows (`Windows 10 / 11` with Visual Studio 2022 C++ & CMake)
+### Windows (`Windows 10 / 11` with Visual Studio 2022/2026 C++ & CMake)
 
 ```powershell
 git clone https://github.com/MaxFreedomPollard/Max-Watch.git
