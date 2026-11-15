@@ -18,14 +18,10 @@ enum MaxWatchSelfTest {
             let vaultDir = rootDir.appendingPathComponent("TestVault", isDirectory: true)
             try? FileManager.default.removeItem(at: vaultDir)
 
-            print("[1/7] Initializing AES-256-GCM + Curve25519 Vault...")
+            print("[1/8] Initializing AES-256-GCM + Curve25519 Vault (verifying starts LOCKED)...")
             let vault = VaultManager(customVaultDirectory: vaultDir)
             try vault.initializeVault(password: "chill-max-watch-2026")
-            try check(vault.isInitialized && vault.isUnlocked, "Vault should be initialized and unlocked")
-
-            // Lock vault BEFORE recording to prove locked-screen / locked-vault recording works!
-            vault.lock()
-            try check(!vault.isUnlocked, "Vault must be locked")
+            try check(vault.isInitialized && !vault.isUnlocked, "Vault must remain LOCKED immediately after initialization")
 
             // Verify wrong password fails cleanly
             var rejectedWrongPassword = false
@@ -37,19 +33,21 @@ enum MaxWatchSelfTest {
             try check(rejectedWrongPassword, "Wrong password must be rejected")
             try check(!vault.isUnlocked, "Vault must still be locked after wrong password")
 
-            print("[2/7] Recording Clip #1 while Vault is LOCKED, then simulating HARD POWER CUT...")
+            print("[2/8] Recording Clip #1 while Vault is LOCKED, then simulating HARD POWER CUT...")
             let powerCutURL = try recordSyntheticClip(
                 vault: vault,
                 durationSeconds: 3.8,
                 simulateHardPowerCut: true
             )
+            try check(!vault.isUnlocked, "Vault must stay LOCKED while saving Clip #1")
 
-            print("[3/7] Recording Clip #2 while Vault is LOCKED, then flushing cleanly (Exit-Safe)...")
+            print("[3/8] Recording Clip #2 while Vault is LOCKED, then flushing cleanly (Exit-Safe)...")
             let cleanExitURL = try recordSyntheticClip(
                 vault: vault,
                 durationSeconds: 3.4,
                 simulateHardPowerCut: false
             )
+            try check(!vault.isUnlocked, "Vault must stay LOCKED while saving Clip #2")
 
             // Verify zero plaintext mp4/mov files exist on disk
             let allFiles = try FileManager.default.subpathsOfDirectory(atPath: vaultDir.path)
@@ -68,7 +66,7 @@ enum MaxWatchSelfTest {
             }
             try check(blockedWhileLocked, "Opening clip reader must fail while vault is locked")
 
-            print("[4/7] Unlocking Vault and verifying Power-Cut Clip recovery + Clean-Exit Clip...")
+            print("[4/8] Unlocking Vault and verifying Power-Cut Clip recovery + Clean-Exit Clip...")
             try vault.unlock(password: "chill-max-watch-2026")
             try check(vault.isUnlocked, "Vault should unlock with valid password")
 
@@ -83,11 +81,19 @@ enum MaxWatchSelfTest {
             try check(cleanReader.header.cleanlyFinalized, "Clean-exit clip should be marked cleanly finalized")
             try check(cleanReader.mediaFragmentCount >= 3, "Clean-exit clip must have >= 3 media segments (got \(cleanReader.mediaFragmentCount))")
 
-            print("[5/7] Verifying zero-disk-plaintext RAM playback at 1x, 4x, and 12x speeds + fast ball seeking...")
+            print("[5/8] Verifying zero-disk-plaintext RAM playback at 1x, 4x, and 12x speeds + fast ball seeking...")
             try verifyPlaybackAndSpeeds(reader: powerCutReader, label: "PowerCutRecoveredClip")
             try verifyPlaybackAndSpeeds(reader: cleanReader, label: "CleanExitClip")
 
-            print("[6/7] Verifying O(1) Vault Password Change & re-unlock...")
+            print("[6/8] Verifying Save & Next MP4 export to external chosen folder...")
+            let externalSaveDir = rootDir.appendingPathComponent("ExternalUserChosenFolder", isDirectory: true)
+            try FileManager.default.createDirectory(at: externalSaveDir, withIntermediateDirectories: true)
+            let exportedMP4 = try vault.exportClipToDirectory(clipURL: cleanExitURL, directoryURL: externalSaveDir)
+            let exportedAttrs = try FileManager.default.attributesOfItem(atPath: exportedMP4.path)
+            let exportedSize = (exportedAttrs[.size] as? NSNumber)?.int64Value ?? 0
+            try check(exportedSize > 10_000, "Exported MP4 should be non-empty (got \(exportedSize) bytes)")
+
+            print("[7/8] Verifying O(1) Vault Password Change & re-unlock...")
             try vault.changePassword(currentPassword: "chill-max-watch-2026", newPassword: "new-vault-password-99")
             vault.lock()
             var oldPassRejected = false
@@ -102,7 +108,7 @@ enum MaxWatchSelfTest {
             try check(postRotateReader.totalPlaintextLength == cleanReader.totalPlaintextLength,
                       "Existing encrypted clips must remain readable after password change")
 
-            print("[7/7] Verifying instant secure wipe deletion...")
+            print("[8/8] Verifying instant Delete & Next secure wipe...")
             try vault.secureDeleteClip(url: powerCutURL)
             try check(!FileManager.default.fileExists(atPath: powerCutURL.path), "Deleted clip must be removed")
             try check(vault.listSummaries().count == 1, "Remaining clip count should be 1")

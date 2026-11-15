@@ -285,8 +285,15 @@ final class AppController: NSObject,
     private var prevClipButton: NSButton!
     private var playPauseButton: NSButton!
     private var nextClipButton: NSButton!
-    private var nextAndDeleteButton: NSButton!
+    private var saveAndNextButton: NSButton!
+    private var deleteAndNextButton: NSButton!
+    private var chooseSaveFolderButton: NSButton!
     private var exportClipButton: NSButton!
+
+    // User-chosen external folder on Mac (outside the Vault) for one-click "Save & Next"
+    private var chosenSaveDirectoryURL: URL?
+    private var hasSecurityScopedSaveDir: Bool = false
+    private var lastVaultInteractionAt: Date = Date()
 
     // Sidebar UI
     private var sidebarHeaderLabel: NSTextField!
@@ -343,9 +350,28 @@ final class AppController: NSObject,
         return false
     }
 
+    func applicationDidHide(_ notification: Notification) {
+        if vault.isUnlocked {
+            lockVaultImmediately(keepCurrentStageIfCamera: false)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if vault.isUnlocked {
+            lockVaultImmediately(keepCurrentStageIfCamera: false)
+        }
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        if vault.isUnlocked {
+            lockVaultImmediately(keepCurrentStageIfCamera: false)
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isTerminatingApp = true
         sleepAndLock.setArmedPreventingIdleSleep(false)
+        releaseChosenSaveDirectoryScope()
 
         if let writer = detachActiveWriterSynchronously() {
             // Flush sub-second tail frames, encrypt & F_FULLFSYNC before quitting!
@@ -440,7 +466,10 @@ final class AppController: NSObject,
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Show Main Window", action: #selector(showMainWindowAction), keyEquivalent: "0")
         fileMenu.addItem(withTitle: "Start or Stop Motion Detection", action: #selector(toggleArmedClicked), keyEquivalent: "r")
-        fileMenu.addItem(withTitle: "Export Selected Clip as MP4...", action: #selector(exportCurrentClipClicked), keyEquivalent: "e")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Save & Next (to Chosen Folder)", action: #selector(saveAndNextClicked), keyEquivalent: "s")
+        fileMenu.addItem(withTitle: "Choose Save & Next Folder...", action: #selector(chooseSaveFolderClicked), keyEquivalent: "S")
+        fileMenu.addItem(withTitle: "Save Current Clip As MP4...", action: #selector(exportCurrentClipClicked), keyEquivalent: "e")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileItem.submenu = fileMenu
@@ -472,7 +501,8 @@ final class AppController: NSObject,
         playMenu.addItem(.separator())
         playMenu.addItem(withTitle: "Previous Clip", action: #selector(prevClipClicked), keyEquivalent: "[")
         playMenu.addItem(withTitle: "Next Clip", action: #selector(nextClipClicked), keyEquivalent: "]")
-        let delItem = playMenu.addItem(withTitle: "Next & Delete Clip", action: #selector(nextAndDeleteClicked), keyEquivalent: String(UnicodeScalar(NSBackspaceCharacter)!))
+        playMenu.addItem(withTitle: "Save & Next", action: #selector(saveAndNextClicked), keyEquivalent: "")
+        let delItem = playMenu.addItem(withTitle: "Delete & Next", action: #selector(deleteAndNextClicked), keyEquivalent: String(UnicodeScalar(NSBackspaceCharacter)!))
         delItem.keyEquivalentModifierMask = [.command]
         playItem.submenu = playMenu
 
@@ -543,7 +573,7 @@ final class AppController: NSObject,
     }
 
     private func buildMainWindow() {
-        let rect = NSRect(x: 0, y: 0, width: 1260, height: 800)
+        let rect = NSRect(x: 0, y: 0, width: 1300, height: 800)
         window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -551,7 +581,7 @@ final class AppController: NSObject,
             defer: false
         )
         window.title = "Max Watch - Offline Motion Security & Encrypted Video Vault"
-        window.minSize = NSSize(width: 1040, height: 680)
+        window.minSize = NSSize(width: 1150, height: 680)
         window.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.06, blue: 0.09, alpha: 1.0)
         window.center()
         window.delegate = self
@@ -996,10 +1026,13 @@ final class AppController: NSObject,
         nowPlayingMetaLabel = makeLabel("Decrypted on-the-fly in RAM • Zero temporary files written to disk", size: 11.5, weight: .regular, color: NSColor(calibratedWhite: 0.70, alpha: 1.0))
         playerHeader.addSubview(nowPlayingMetaLabel)
 
-        exportClipButton = makeButton(title: "Export MP4...", action: #selector(exportCurrentClipClicked))
+        chooseSaveFolderButton = makeButton(title: "📁 Save Folder: Choose...", action: #selector(chooseSaveFolderClicked))
+        playerHeader.addSubview(chooseSaveFolderButton)
+
+        exportClipButton = makeButton(title: "Save As...", action: #selector(exportCurrentClipClicked))
         playerHeader.addSubview(exportClipButton)
 
-        let backBtn = makeButton(title: "Back to Live Camera", action: #selector(switchToLiveCameraClicked), tint: .systemGreen)
+        let backBtn = makeButton(title: "🔒 Lock & Live Camera", action: #selector(switchToLiveCameraClicked), tint: .systemGreen)
         playerHeader.addSubview(backBtn)
 
         let videoWrap = NSView()
@@ -1042,21 +1075,24 @@ final class AppController: NSObject,
         playerTimeReadoutLabel.alignment = .right
         controlsCard.addSubview(playerTimeReadoutLabel)
 
-        // Transport + Speed Row
+        // Transport + Save & Next + Delete & Next + Speed Row
         playAllPlayerButton = makeButton(title: "▶ Play All", action: #selector(playAllClicked), tint: .systemCyan)
         controlsCard.addSubview(playAllPlayerButton)
 
         prevClipButton = makeButton(title: "⏮ Prev", action: #selector(prevClipClicked))
         controlsCard.addSubview(prevClipButton)
 
-        playPauseButton = makeButton(title: "⏯ Play / Pause", action: #selector(togglePlayPauseClicked))
+        playPauseButton = makeButton(title: "⏯ Play/Pause", action: #selector(togglePlayPauseClicked))
         controlsCard.addSubview(playPauseButton)
 
         nextClipButton = makeButton(title: "Next ⏭", action: #selector(nextClipClicked))
         controlsCard.addSubview(nextClipButton)
 
-        nextAndDeleteButton = makeButton(title: "🗑 Next & Delete", action: #selector(nextAndDeleteClicked), tint: .systemRed)
-        controlsCard.addSubview(nextAndDeleteButton)
+        saveAndNextButton = makeButton(title: "💾 Save & Next", action: #selector(saveAndNextClicked), tint: .systemGreen)
+        controlsCard.addSubview(saveAndNextButton)
+
+        deleteAndNextButton = makeButton(title: "🗑 Delete & Next", action: #selector(deleteAndNextClicked), tint: .systemRed)
+        controlsCard.addSubview(deleteAndNextButton)
 
         let speedLabel = makeLabel("Speed:", size: 12, weight: .semibold, color: NSColor(calibratedWhite: 0.82, alpha: 1.0))
         controlsCard.addSubview(speedLabel)
@@ -1115,18 +1151,23 @@ final class AppController: NSObject,
 
             nowPlayingTitleLabel.topAnchor.constraint(equalTo: playerHeader.topAnchor, constant: 8),
             nowPlayingTitleLabel.leadingAnchor.constraint(equalTo: playerHeader.leadingAnchor, constant: 14),
-            nowPlayingTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: exportClipButton.leadingAnchor, constant: -12),
+            nowPlayingTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseSaveFolderButton.leadingAnchor, constant: -10),
 
             nowPlayingMetaLabel.topAnchor.constraint(equalTo: nowPlayingTitleLabel.bottomAnchor, constant: 2),
             nowPlayingMetaLabel.leadingAnchor.constraint(equalTo: nowPlayingTitleLabel.leadingAnchor),
+            nowPlayingMetaLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseSaveFolderButton.leadingAnchor, constant: -10),
 
             backBtn.trailingAnchor.constraint(equalTo: playerHeader.trailingAnchor, constant: -14),
             backBtn.centerYAnchor.constraint(equalTo: playerHeader.centerYAnchor),
             backBtn.heightAnchor.constraint(equalToConstant: 32),
 
-            exportClipButton.trailingAnchor.constraint(equalTo: backBtn.leadingAnchor, constant: -10),
+            exportClipButton.trailingAnchor.constraint(equalTo: backBtn.leadingAnchor, constant: -8),
             exportClipButton.centerYAnchor.constraint(equalTo: playerHeader.centerYAnchor),
             exportClipButton.heightAnchor.constraint(equalToConstant: 32),
+
+            chooseSaveFolderButton.trailingAnchor.constraint(equalTo: exportClipButton.leadingAnchor, constant: -8),
+            chooseSaveFolderButton.centerYAnchor.constraint(equalTo: playerHeader.centerYAnchor),
+            chooseSaveFolderButton.heightAnchor.constraint(equalToConstant: 32),
 
             videoWrap.topAnchor.constraint(equalTo: playerHeader.bottomAnchor, constant: 10),
             videoWrap.leadingAnchor.constraint(equalTo: unlockedPlayerContent.leadingAnchor, constant: 14),
@@ -1155,30 +1196,35 @@ final class AppController: NSObject,
             playerTimeReadoutLabel.centerYAnchor.constraint(equalTo: scrubHint.centerYAnchor),
             playerTimeReadoutLabel.widthAnchor.constraint(equalToConstant: 142),
 
-            playAllPlayerButton.leadingAnchor.constraint(equalTo: controlsCard.leadingAnchor, constant: 16),
+            playAllPlayerButton.leadingAnchor.constraint(equalTo: controlsCard.leadingAnchor, constant: 14),
             playAllPlayerButton.bottomAnchor.constraint(equalTo: controlsCard.bottomAnchor, constant: -14),
             playAllPlayerButton.heightAnchor.constraint(equalToConstant: 34),
 
-            prevClipButton.leadingAnchor.constraint(equalTo: playAllPlayerButton.trailingAnchor, constant: 8),
+            prevClipButton.leadingAnchor.constraint(equalTo: playAllPlayerButton.trailingAnchor, constant: 6),
             prevClipButton.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
             prevClipButton.heightAnchor.constraint(equalToConstant: 34),
 
-            playPauseButton.leadingAnchor.constraint(equalTo: prevClipButton.trailingAnchor, constant: 8),
+            playPauseButton.leadingAnchor.constraint(equalTo: prevClipButton.trailingAnchor, constant: 6),
             playPauseButton.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
             playPauseButton.heightAnchor.constraint(equalToConstant: 34),
 
-            nextClipButton.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 8),
+            nextClipButton.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 6),
             nextClipButton.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
             nextClipButton.heightAnchor.constraint(equalToConstant: 34),
 
-            nextAndDeleteButton.leadingAnchor.constraint(equalTo: nextClipButton.trailingAnchor, constant: 10),
-            nextAndDeleteButton.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
-            nextAndDeleteButton.heightAnchor.constraint(equalToConstant: 34),
+            saveAndNextButton.leadingAnchor.constraint(equalTo: nextClipButton.trailingAnchor, constant: 8),
+            saveAndNextButton.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
+            saveAndNextButton.heightAnchor.constraint(equalToConstant: 34),
 
-            speedSegmentedControl.trailingAnchor.constraint(equalTo: controlsCard.trailingAnchor, constant: -16),
+            deleteAndNextButton.leadingAnchor.constraint(equalTo: saveAndNextButton.trailingAnchor, constant: 8),
+            deleteAndNextButton.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
+            deleteAndNextButton.heightAnchor.constraint(equalToConstant: 34),
+
+            speedSegmentedControl.trailingAnchor.constraint(equalTo: controlsCard.trailingAnchor, constant: -14),
             speedSegmentedControl.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
 
-            speedLabel.trailingAnchor.constraint(equalTo: speedSegmentedControl.leadingAnchor, constant: -8),
+            speedLabel.trailingAnchor.constraint(equalTo: speedSegmentedControl.leadingAnchor, constant: -6),
+            speedLabel.leadingAnchor.constraint(greaterThanOrEqualTo: deleteAndNextButton.trailingAnchor, constant: 10),
             speedLabel.centerYAnchor.constraint(equalTo: playAllPlayerButton.centerYAnchor),
 
             lockedOverlayCard.centerXAnchor.constraint(equalTo: playerStageView.centerXAnchor),
@@ -1209,7 +1255,12 @@ final class AppController: NSObject,
         playerStageView.isHidden = !playerMode
         modeSwitchButton.title = playerMode ? "Live Camera" : "Vault Player"
         if !playerMode {
-            player.pause()
+            // Security invariant: whenever Live Camera / Motion Monitoring is active on screen,
+            // keep the vault strictly LOCKED so nobody entering the room can press Play All or Delete!
+            unloadActivePlayerClip()
+            vault.lock()
+        } else {
+            lastVaultInteractionAt = Date()
         }
         refreshVaultUIState()
     }
@@ -1603,6 +1654,14 @@ final class AppController: NSObject,
         }
 
         // Start a brand-new AES-256-GCM 1s-chunked vault recording!
+        // Enforce strict locked-while-saving invariant: always locked in Live Camera mode,
+        // and also immediately lock an unattended paused Vault Player (>20s idle) if someone enters the room!
+        if vault.isUnlocked {
+            let unattendedPlayer = isInPlayerMode && player.rate == 0 && !scrubberBallView.isDraggingBall && now.timeIntervalSince(lastVaultInteractionAt) > 20.0
+            if !isInPlayerMode || unattendedPlayer {
+                lockVaultImmediately(keepCurrentStageIfCamera: false)
+            }
+        }
         do {
             let clipWriter = try vault.createClipWriter(
                 width: activeWidth,
@@ -1636,6 +1695,9 @@ final class AppController: NSObject,
         isRecordingClip = false
         recordingStartedAt = nil
         recordingStopDeadline = nil
+        if !isInPlayerMode && vault.isUnlocked {
+            vault.lock()
+        }
         refreshStatusBarIcon()
         updateHeaderStatusTexts()
 
@@ -1649,7 +1711,11 @@ final class AppController: NSObject,
             }
             active.stopAndFinalize { [weak self] _, _, _ in
                 DispatchQueue.main.async {
-                    self?.refreshVaultUIState()
+                    guard let self = self else { return }
+                    if !self.isInPlayerMode && self.vault.isUnlocked {
+                        self.vault.lock()
+                    }
+                    self.refreshVaultUIState()
                     completion?()
                 }
             }
@@ -1699,7 +1765,7 @@ final class AppController: NSObject,
                 let rem = max(0, Int((recordingStopDeadline ?? now).timeIntervalSince(now).rounded(.up)))
                 hudRecordingBadge.superview?.isHidden = false
                 hudRecordingBadge.stringValue = String(
-                    format: "● REC %02d:%02d • Holds %ds • 1s Power-Cut-Safe Sync",
+                    format: "● REC %02d:%02d • Vault Locked • Holds %ds",
                     elapsed / 60,
                     elapsed % 60,
                     rem
@@ -1708,19 +1774,30 @@ final class AppController: NSObject,
         } else {
             hudRecordingBadge.superview?.isHidden = true
         }
+
+        // Auto-lock idle unlocked Vault Player after 90s of inactivity so an unattended Mac never stays unlocked
+        if vault.isUnlocked {
+            if !isInPlayerMode {
+                vault.lock()
+                refreshVaultUIState()
+            } else if player.rate == 0 && !scrubberBallView.isDraggingBall && now.timeIntervalSince(lastVaultInteractionAt) > 90.0 {
+                lockVaultImmediately(keepCurrentStageIfCamera: false)
+            }
+        }
     }
 
     private func updateHeaderStatusTexts() {
+        let lockBadge = vault.isUnlocked ? "VAULT UNLOCKED" : "VAULT LOCKED"
         if isRecordingClip {
-            statusPillLabel.stringValue = "● RECORDING TO ENCRYPTED VAULT"
+            statusPillLabel.stringValue = "● RECORDING • \(lockBadge)"
             statusPillLabel.textColor = .systemRed
-            hudPrimaryLabel.stringValue = "RECORDING MOTION • \(activeCameraSummary) • Safe on Exit & Power Loss"
+            hudPrimaryLabel.stringValue = "RECORDING TO LOCKED VAULT • \(activeCameraSummary) • Safe on Exit & Power Loss"
         } else if isArmed {
-            statusPillLabel.stringValue = "● ARMED (ACTIVE EVEN WHEN SCREEN LOCKED)"
+            statusPillLabel.stringValue = "● ARMED • \(lockBadge) (WORKS LOCKED)"
             statusPillLabel.textColor = .systemGreen
-            hudPrimaryLabel.stringValue = "ARMED & WATCHING • \(activeCameraSummary) • Lock screen anytime (Ctrl+Cmd+Q)"
+            hudPrimaryLabel.stringValue = "ARMED & WATCHING (VAULT LOCKED) • \(activeCameraSummary) • Lock screen anytime (Ctrl+Cmd+Q)"
         } else {
-            statusPillLabel.stringValue = vault.isUnlocked ? "OFFLINE • VAULT UNLOCKED" : "OFFLINE • VAULT LOCKED"
+            statusPillLabel.stringValue = "OFFLINE • \(lockBadge)"
             statusPillLabel.textColor = .systemTeal
             if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
                 hudPrimaryLabel.stringValue = "LIVE PREVIEW • \(activeCameraSummary) • Press 'Start Motion Detection' to arm"
@@ -1744,8 +1821,12 @@ final class AppController: NSObject,
         }
 
         // Ensure vault has a password before arming so every recorded clip is encrypted under user's password!
+        // Importantly, unlockAfterCreate is FALSE so the vault stays strictly LOCKED while monitoring & saving!
         guard vault.isInitialized else {
-            presentCreatePasswordSheet(reason: "Create a Vault Password first so all motion recordings are encrypted for your eyes only.") { [weak self] success in
+            presentCreatePasswordSheet(
+                reason: "Create a Vault Password first so all motion recordings are encrypted and locked against tampering while Max Watch saves.",
+                unlockAfterCreate: false
+            ) { [weak self] success in
                 if success {
                     self?.armNow()
                 }
@@ -1756,6 +1837,9 @@ final class AppController: NSObject,
     }
 
     private func armNow() {
+        // Always lock the vault and switch to Live Camera when arming Motion Detection
+        // so nobody entering the room can press Play All or Delete without the password!
+        lockVaultImmediately(keepCurrentStageIfCamera: false)
         isArmed = true
         let warmup = Date().addingTimeInterval(1.1)
         mediaSampleQueue.async { [weak self] in
@@ -1811,14 +1895,18 @@ final class AppController: NSObject,
 
     @objc private func vaultLockButtonClicked() {
         if !vault.isInitialized {
-            presentCreatePasswordSheet(reason: "Choose a password to protect your offline video vault and Play All button.") { [weak self] _ in
+            presentCreatePasswordSheet(
+                reason: "Choose a password to protect your offline video vault and Play All button.",
+                unlockAfterCreate: false
+            ) { [weak self] _ in
                 self?.refreshVaultUIState()
             }
         } else if vault.isUnlocked {
-            lockVaultImmediately(keepCurrentStageIfCamera: true)
+            lockVaultImmediately(keepCurrentStageIfCamera: false)
         } else {
-            presentUnlockPasswordSheet(prompt: "Enter your Vault Password to unlock saved clips.") { [weak self] unlocked in
+            presentUnlockPasswordSheet(prompt: "Enter your Vault Password to review saved clips.") { [weak self] unlocked in
                 guard let self = self, unlocked else { return }
+                self.setStageMode(playerMode: true)
                 self.refreshVaultUIState()
             }
         }
@@ -1839,7 +1927,7 @@ final class AppController: NSObject,
 
     // MARK: - Password Sheets (Create / Unlock / Change / Reset)
 
-    private func presentCreatePasswordSheet(reason: String, completion: @escaping (Bool) -> Void) {
+    private func presentCreatePasswordSheet(reason: String, unlockAfterCreate: Bool, completion: @escaping (Bool) -> Void) {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -1869,18 +1957,21 @@ final class AppController: NSObject,
             let p2 = pass2.stringValue
             guard p1.count >= 4 else {
                 self.showSimpleError("Password must be at least 4 characters.") {
-                    self.presentCreatePasswordSheet(reason: reason, completion: completion)
+                    self.presentCreatePasswordSheet(reason: reason, unlockAfterCreate: unlockAfterCreate, completion: completion)
                 }
                 return
             }
             guard p1 == p2 else {
                 self.showSimpleError("Passwords did not match. Please try again.") {
-                    self.presentCreatePasswordSheet(reason: reason, completion: completion)
+                    self.presentCreatePasswordSheet(reason: reason, unlockAfterCreate: unlockAfterCreate, completion: completion)
                 }
                 return
             }
             do {
                 try self.vault.initializeVault(password: p1)
+                if unlockAfterCreate {
+                    try self.vault.unlock(password: p1)
+                }
                 self.refreshVaultUIState()
                 completion(true)
             } catch {
@@ -1914,6 +2005,7 @@ final class AppController: NSObject,
             }
             do {
                 try self.vault.unlock(password: passField.stringValue)
+                self.lastVaultInteractionAt = Date()
                 self.refreshVaultUIState()
                 completion(true)
             } catch {
@@ -1926,7 +2018,10 @@ final class AppController: NSObject,
 
     @objc private func changePasswordClicked() {
         if !vault.isInitialized {
-            presentCreatePasswordSheet(reason: "Create a Vault Password to protect your saved clips and Play All.") { _ in }
+            presentCreatePasswordSheet(
+                reason: "Create a Vault Password to protect your saved clips and Play All.",
+                unlockAfterCreate: false
+            ) { _ in }
             return
         }
 
@@ -2044,7 +2139,10 @@ final class AppController: NSObject,
         }
 
         if !vault.isInitialized {
-            presentCreatePasswordSheet(reason: "Create a Vault Password to unlock Play All and encrypt recordings.") { ok in
+            presentCreatePasswordSheet(
+                reason: "Create a Vault Password to unlock Play All and encrypt recordings.",
+                unlockAfterCreate: true
+            ) { ok in
                 if ok { proceedUnlocked() }
             }
         } else if !vault.isUnlocked {
@@ -2057,11 +2155,12 @@ final class AppController: NSObject,
     }
 
     private func startPlayAllUnlockedSequence() {
-        refreshVaultUIState()
+        lastVaultInteractionAt = Date()
         setStageMode(playerMode: true)
+        refreshVaultUIState()
         guard !unlockedClips.isEmpty else {
             nowPlayingTitleLabel.stringValue = "Vault is unlocked (0 clips recorded yet)"
-            nowPlayingMetaLabel.stringValue = "Switch to Live Camera and click 'Start Motion Detection' to capture motion clips."
+            nowPlayingMetaLabel.stringValue = "Click 'Lock & Live Camera' and 'Start Motion Detection' to capture motion clips while locked."
             return
         }
         isPlayAllSequentialActive = true
@@ -2146,6 +2245,7 @@ final class AppController: NSObject,
     }
 
     private func handleUserBallScrub(seconds: Double, isDragging: Bool) {
+        lastVaultInteractionAt = Date()
         guard player.currentItem != nil else { return }
         if isDragging {
             if player.rate != 0 {
@@ -2219,6 +2319,7 @@ final class AppController: NSObject,
     }
 
     private func setPlaybackSpeed(_ speed: Float) {
+        lastVaultInteractionAt = Date()
         selectedPlaybackSpeed = speed
         if player.rate > 0 {
             applyPlaybackSpeedAndPlay()
@@ -2237,6 +2338,7 @@ final class AppController: NSObject,
     }
 
     @objc private func togglePlayPauseClicked() {
+        lastVaultInteractionAt = Date()
         guard vault.isUnlocked else {
             playAllClicked()
             return
@@ -2258,19 +2360,127 @@ final class AppController: NSObject,
     }
 
     @objc private func prevClipClicked() {
+        lastVaultInteractionAt = Date()
         guard vault.isUnlocked, !unlockedClips.isEmpty else { return }
         let target = max(0, (currentClipIndex <= 0 ? 0 : currentClipIndex - 1))
         loadAndPlayClip(at: target, autoPlay: true)
     }
 
     @objc private func nextClipClicked() {
+        lastVaultInteractionAt = Date()
         guard vault.isUnlocked, !unlockedClips.isEmpty else { return }
         if currentClipIndex + 1 < unlockedClips.count {
             loadAndPlayClip(at: currentClipIndex + 1, autoPlay: true)
         }
     }
 
-    @objc private func nextAndDeleteClicked() {
+    // MARK: - Save & Next (to User-Chosen Mac Folder Outside Vault) + Delete & Next
+
+    private func releaseChosenSaveDirectoryScope() {
+        if hasSecurityScopedSaveDir, let dir = chosenSaveDirectoryURL {
+            dir.stopAccessingSecurityScopedResource()
+            hasSecurityScopedSaveDir = false
+        }
+    }
+
+    private func promptForSaveFolder(completion: @escaping (URL?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.title = "Choose Folder on Your Mac for 'Save & Next'"
+        panel.message = "Select any folder on your Mac (outside the encrypted vault) where 'Save & Next' should save standard MP4 video copies."
+        panel.prompt = "Choose Save Folder"
+
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard let self = self, resp == .OK, let picked = panel.url else {
+                completion(nil)
+                return
+            }
+            let stdPicked = picked.standardizedFileURL.path
+            let stdVault = self.vault.vaultDirectoryURL.standardizedFileURL.path
+            if stdPicked == stdVault || stdPicked.hasPrefix(stdVault + "/") {
+                self.showSimpleError("Please choose a folder on your Mac outside the internal Encrypted Vault (for example Desktop, Movies, or Downloads).") {
+                    completion(nil)
+                }
+                return
+            }
+
+            self.releaseChosenSaveDirectoryScope()
+            let scoped = picked.startAccessingSecurityScopedResource()
+            self.chosenSaveDirectoryURL = picked
+            self.hasSecurityScopedSaveDir = scoped
+            self.chooseSaveFolderButton.title = "📁 Save Folder: \(picked.lastPathComponent)"
+            completion(picked)
+        }
+    }
+
+    @objc private func chooseSaveFolderClicked() {
+        lastVaultInteractionAt = Date()
+        promptForSaveFolder { [weak self] dir in
+            guard let self = self, let d = dir else { return }
+            self.nowPlayingMetaLabel.stringValue = "Save & Next destination set to '\(d.lastPathComponent)' on your Mac."
+        }
+    }
+
+    @objc private func saveAndNextClicked() {
+        lastVaultInteractionAt = Date()
+        guard vault.isUnlocked else {
+            playAllClicked()
+            return
+        }
+        guard !unlockedClips.isEmpty else {
+            showSimpleInfo("No Clips to Save", detail: "Your encrypted vault does not have any recorded clips yet.")
+            return
+        }
+        let targetIndex = (currentClipIndex >= 0 && currentClipIndex < unlockedClips.count) ? currentClipIndex : 0
+        if currentClipIndex != targetIndex {
+            loadAndPlayClip(at: targetIndex, autoPlay: false)
+        }
+
+        let performSaveAndAdvance: (URL) -> Void = { [weak self] dirURL in
+            guard let self = self,
+                  self.vault.isUnlocked,
+                  targetIndex >= 0,
+                  targetIndex < self.unlockedClips.count else { return }
+            let summary = self.unlockedClips[targetIndex]
+            do {
+                let savedURL = try self.vault.exportClipToDirectory(clipURL: summary.url, directoryURL: dirURL)
+                let savedNote = "Saved \(savedURL.lastPathComponent) to '\(dirURL.lastPathComponent)'"
+                if targetIndex + 1 < self.unlockedClips.count {
+                    self.loadAndPlayClip(at: targetIndex + 1, autoPlay: true)
+                    self.nowPlayingMetaLabel.stringValue = "\(savedNote) • Playing next clip"
+                } else {
+                    self.player.pause()
+                    self.isPlayAllSequentialActive = false
+                    self.nowPlayingMetaLabel.stringValue = "\(savedNote) • Reached final clip (\(self.unlockedClips.count) of \(self.unlockedClips.count))"
+                }
+            } catch {
+                self.showSimpleError("Save & Next failed: \(error.localizedDescription)") {}
+            }
+        }
+
+        if let existingDir = chosenSaveDirectoryURL {
+            performSaveAndAdvance(existingDir)
+        } else {
+            let wasPlaying = (player.rate != 0)
+            if wasPlaying {
+                player.pause()
+            }
+            promptForSaveFolder { [weak self] pickedDir in
+                guard let self = self else { return }
+                if let dir = pickedDir {
+                    performSaveAndAdvance(dir)
+                } else if wasPlaying {
+                    self.applyPlaybackSpeedAndPlay()
+                }
+            }
+        }
+    }
+
+    @objc private func deleteAndNextClicked() {
+        lastVaultInteractionAt = Date()
         guard vault.isUnlocked, currentClipIndex >= 0, currentClipIndex < unlockedClips.count else { return }
         let doomed = unlockedClips[currentClipIndex]
         let resumeIdx = currentClipIndex
@@ -2280,17 +2490,24 @@ final class AppController: NSObject,
         refreshVaultUIState()
 
         if unlockedClips.isEmpty {
+            isPlayAllSequentialActive = false
             nowPlayingTitleLabel.stringValue = "All clips deleted - Vault is empty"
             nowPlayingMetaLabel.stringValue = "Securely zero-wiped and removed from disk."
             scrubberBallView.currentSeconds = 0
             updatePlayerTimeReadout(current: 0, total: 0)
+        } else if resumeIdx < unlockedClips.count {
+            loadAndPlayClip(at: resumeIdx, autoPlay: true)
+            nowPlayingMetaLabel.stringValue = "Deleted previous clip • Playing next clip (\(resumeIdx + 1) of \(unlockedClips.count))"
         } else {
-            let nextIdx = min(resumeIdx, unlockedClips.count - 1)
-            loadAndPlayClip(at: nextIdx, autoPlay: true)
+            isPlayAllSequentialActive = false
+            let lastIdx = unlockedClips.count - 1
+            loadAndPlayClip(at: lastIdx, autoPlay: false)
+            nowPlayingMetaLabel.stringValue = "Deleted final clip • Reached end of vault (\(unlockedClips.count) remaining)"
         }
     }
 
     @objc private func exportCurrentClipClicked() {
+        lastVaultInteractionAt = Date()
         guard vault.isUnlocked, currentClipIndex >= 0, currentClipIndex < unlockedClips.count else {
             showSimpleInfo("Select an Unlocked Clip First", detail: "Unlock the vault and select a clip to export a decrypted MP4 copy.")
             return
@@ -2299,12 +2516,13 @@ final class AppController: NSObject,
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.mpeg4Movie]
         savePanel.nameFieldStringValue = summary.url.deletingPathExtension().lastPathComponent + ".mp4"
-        savePanel.title = "Export Decrypted MP4 Clip"
-        savePanel.message = "Note: Exported MP4 files outside Max Watch are standard video files and are no longer password-locked."
+        savePanel.title = "Save Decrypted MP4 Clip As..."
+        savePanel.message = "Choose anywhere on your Mac to save a standard MP4 copy outside the encrypted vault."
         savePanel.beginSheetModal(for: window) { [weak self] resp in
             guard let self = self, resp == .OK, let dest = savePanel.url else { return }
             do {
                 try self.vault.exportClipAsMP4(clipURL: summary.url, destinationURL: dest)
+                self.nowPlayingMetaLabel.stringValue = "Saved \(dest.lastPathComponent) to '\(dest.deletingLastPathComponent().lastPathComponent)'"
             } catch {
                 self.showSimpleError("Export failed: \(error.localizedDescription)") {}
             }
@@ -2359,6 +2577,7 @@ final class AppController: NSObject,
     }
 
     @objc private func onVaultClipRowClicked() {
+        lastVaultInteractionAt = Date()
         let row = clipsTableView.clickedRow
         guard vault.isUnlocked, row >= 0, row < unlockedClips.count else { return }
         isPlayAllSequentialActive = false
@@ -2391,15 +2610,17 @@ final class AppController: NSObject,
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.icon = NSApp.applicationIconImage
-        alert.messageText = "Max Watch (v1.0.0)"
+        alert.messageText = "Max Watch (v1.1.0)"
         alert.informativeText = """
         A free, 100% offline, encrypted motion-detection security camera & video vault for Mac - gifted to the community by Max Freedom Pollard.
 
         • Zero network access (sandboxed offline at the macOS kernel level)
+        • Vault stays strictly locked while arming & saving clips against room tampering
         • Works continuously even while your Mac screen is locked
         • AES-256-GCM encrypted vault + password-locked Play All
         • 1-second power-cut-safe recording + clean exit save
         • Fast-drag timeline scrubber ball + 1x / 4x / 12x playback
+        • One-click Save & Next (to any Mac folder) + Delete & Next
 
         Stay safe, stay peaceful, and take good care of each other.
         """

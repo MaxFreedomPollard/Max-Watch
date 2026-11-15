@@ -735,11 +735,13 @@ final class VaultManager {
 
         try writeManifestAtomically(manifest)
 
+        // Security invariant: keep vault LOCKED immediately after password creation so arming
+        // and saving clips never leaves Play All or Delete exposed if someone enters the room.
         stateLock.lock()
         if var existing = unlockedPrivateKeyBytes {
             VaultCryptoPrimitives.secureZero(&existing)
         }
-        unlockedPrivateKeyBytes = Data(privRaw)
+        unlockedPrivateKeyBytes = nil
         stateLock.unlock()
     }
 
@@ -1026,6 +1028,18 @@ final class VaultManager {
             Darwin.close(fd)
         }
         try FileManager.default.removeItem(at: url)
+    }
+
+    func exportClipToDirectory(clipURL: URL, directoryURL: URL) throws -> URL {
+        let baseName = clipURL.deletingPathExtension().lastPathComponent
+        var candidate = directoryURL.appendingPathComponent("\(baseName).mp4", isDirectory: false)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directoryURL.appendingPathComponent("\(baseName)-\(suffix).mp4", isDirectory: false)
+            suffix += 1
+        }
+        try exportClipAsMP4(clipURL: clipURL, destinationURL: candidate)
+        return candidate
     }
 
     func exportClipAsMP4(clipURL: URL, destinationURL: URL) throws {
