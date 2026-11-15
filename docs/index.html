@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Max Watch - Free 100% Offline Motion Security for Mac</title>
+  <style>
+    :root {
+      --bg: #080b12;
+      --card: #101622;
+      --border: rgba(255,255,255,0.10);
+      --text: #f3f6fb;
+      --muted: #9fb0c7;
+      --accent: #2dd4bf;
+      --cyan: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(circle at 80% 0%, rgba(45,212,191,0.12), transparent 45%), var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 56px 24px 80px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 6px 14px; border-radius: 999px;
+      background: rgba(45,212,191,0.12); border: 1px solid rgba(45,212,191,0.35);
+      color: var(--accent); font-weight: 600; font-size: 13px;
+    }
+    h1 { font-size: 44px; letter-spacing: -0.02em; margin: 18px 0 12px; }
+    .lead { font-size: 19px; color: var(--muted); max-width: 680px; margin-bottom: 28px; }
+    .btns { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 44px; }
+    .btn {
+      display: inline-block; padding: 12px 22px; border-radius: 10px;
+      text-decoration: none; font-weight: 600; font-size: 15px;
+    }
+    .btn-primary { background: linear-gradient(135deg, var(--accent), var(--cyan)); color: #041019; }
+    .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 20px;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 17px; color: #fff; }
+    .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+    footer {
+      margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--border);
+      color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    }
+    footer a { color: var(--cyan); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="badge">MF • 100% Free &amp; Offline Gift to the Community</div>
+    <h1>Max Watch</h1>
+    <p class="lead">
+      A free, 100% offline motion-detection security camera and AES-256 encrypted video vault for macOS, built and gifted to the community by Max Freedom Pollard. Works on every Apple Silicon and Intel Mac (macOS 13.0+), even while your screen is locked.
+    </p>
+    <div class="btns">
+      <a class="btn btn-primary" href="https://github.com/MaxFreedomPollard/Max-Watch/releases/latest">Download Signed Mac Installer</a>
+      <a class="btn btn-secondary" href="https://github.com/MaxFreedomPollard/Max-Watch">View Open-Source Code on GitHub</a>
+      <a class="btn btn-secondary" href="./privacy.html">Privacy Policy</a>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Works While Screen Is Locked</h3>
+        <p>Arm Max Watch and press Ctrl+Cmd+Q to lock your Mac. Motion detection and encrypted recording continue uninterrupted in the background.</p>
+      </div>
+      <div class="card">
+        <h3>AES-256 Encrypted Video Vault</h3>
+        <p>Every clip is encrypted in memory before touching your drive. Play All and vault browsing are locked behind your local password.</p>
+      </div>
+      <div class="card">
+        <h3>Power-Cut &amp; Exit Safe</h3>
+        <p>1-second encrypted fMP4 segments sync to disk continuously so clips survive sudden power loss, and quitting flushes active recordings cleanly.</p>
+      </div>
+      <div class="card">
+        <h3>Motion Detect Sliding Scale</h3>
+        <p>Dial in subtle movement or heavy-motion-only triggers with a live motion energy meter and 48 kHz AAC microphone meter.</p>
+      </div>
+      <div class="card">
+        <h3>Fast-Drag Scrubber Ball &amp; 12x Speed</h3>
+        <p>Slide the luminous second ball across any recording for instant frame-accurate scrubbing, or shuttle through footage at Normal (1x), 4x, or 12x speed.</p>
+      </div>
+      <div class="card">
+        <h3>Kernel-Enforced Zero Network</h3>
+        <p>Sandboxed by macOS with zero network entitlements. No cloud accounts, no subscriptions, no telemetry, and no network sockets ever.</p>
+      </div>
+    </div>
+
+    <footer>
+      <span>Gifted freely by Max Freedom Pollard.</span>
+      <span>
+        <a href="./privacy.html">Privacy Policy</a> &middot;
+        <a href="https://github.com/MaxFreedomPollard/Max-Watch/issues">Support &amp; Issues</a>
+      </span>
+    </footer>
+  </div>
+</body>
+</html>

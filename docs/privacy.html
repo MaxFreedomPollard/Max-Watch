@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy - Max Watch</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      background: #080b12;
+      color: #f3f6fb;
+      line-height: 1.65;
+    }
+    .wrap { max-width: 740px; margin: 0 auto; padding: 52px 24px 72px; }
+    h1 { font-size: 34px; margin-bottom: 8px; }
+    h2 { font-size: 20px; margin-top: 28px; color: #38bdf8; }
+    p, li { color: #c4d0e0; font-size: 15.5px; }
+    a { color: #2dd4bf; text-decoration: none; }
+    .box {
+      background: #101622; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px; padding: 18px 20px; margin: 22px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p><a href="./index.html">&larr; Back to Max Watch</a></p>
+    <h1>Max Watch Privacy Policy</h1>
+    <p><strong>Effective Date:</strong> November 14, 2026</p>
+
+    <div class="box">
+      <strong>Short Summary:</strong> Max Watch is 100% offline. It collects zero personal data, zero video or audio data, zero analytics, and has zero network access at the macOS operating system sandbox level.
+    </div>
+
+    <h2>1. Zero Data Collection</h2>
+    <p>Max Watch does not collect, transmit, upload, rent, or share any information of any kind. There are no user accounts, no cloud servers, no analytics SDKs, and no telemetry.</p>
+
+    <h2>2. Local Camera &amp; Microphone Processing</h2>
+    <p>Camera video frames and microphone audio samples are processed exclusively in memory on your Mac to detect motion and write AES-256-GCM encrypted recordings into your local application vault folder (<code>~/Library/Containers/app.c60.maxwatch/Data/Library/Application Support/MaxWatch/Vault</code>).</p>
+
+    <h2>3. Local Encryption &amp; Passwords</h2>
+    <p>Your vault password is used solely on your Mac via PBKDF2-HMAC-SHA256 (310,000 iterations) to protect your local Curve25519 + AES-256-GCM encryption keys. Because no password or recovery key is ever transmitted or stored externally, forgotten passwords cannot be recovered by anyone.</p>
+
+    <h2>4. Operating System Sandbox Enforcement</h2>
+    <p>Max Watch runs inside the macOS App Sandbox without client or server network entitlements (<code>com.apple.security.network.client</code> and <code>com.apple.security.network.server</code> are omitted). macOS blocks any outbound or inbound network connection by design.</p>
+
+    <h2>5. Contact &amp; Open Source Verification</h2>
+    <p>The full source code is publicly auditable at <a href="https://github.com/MaxFreedomPollard/Max-Watch">github.com/MaxFreedomPollard/Max-Watch</a>. Questions or support requests can be opened on <a href="https://github.com/MaxFreedomPollard/Max-Watch/issues">GitHub Issues</a>.</p>
+  </div>
+</body>
+</html>
