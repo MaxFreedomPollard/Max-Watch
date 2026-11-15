@@ -1,8 +1,6 @@
 # Max Watch | Free Mac & Windows Security Cam. 
 ## Encrypted. Offline. Works on Screen Lock. Motion Detect. Password Protected. 
-## Actually free, no upgrade possible. Works on download, no setup. No internet, ever. 
-
-**A 100% offline, free, encrypted Mac & Windows video recorder with motion detection.**
+## Actually free, no upgrade possible. Works on download, no setup. 
 
 Max Watch gives every Mac and Windows PC a free motion-activated webcam and USB security camera recorder that keeps recording even while your screen is locked. Every clip is encrypted in memory with `AES-256-GCM` into a password-protected local video vault, with zero cloud servers, zero accounts, zero subscriptions, and zero network access. It's designed to save the clip it's recording even if someone shuts down the computer or closes the program, and nobody can watch the videos without your password, unless you save them to a different part of the computer. Once in "Play All" mode, it plays all the motion detected clips and you either press "delete and next" or "save and next" or just "next" if you're still deciding. No setup required besides putting in the initial password. The only free Mac & Windows security camera app that works when your screen is locked, better than any paid app for offline Mac and Windows security camera recording.
 
