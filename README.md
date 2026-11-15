@@ -1,35 +1,51 @@
 # Max Watch
 
-**A free, 100% secure, 100% offline motion-detection security camera and encrypted video vault for Mac - gifted to the community by Max Freedom Pollard.**
+**A 100% offline, free, encrypted Mac video recorder with motion detection.**
 
-Max Watch turns any Apple Silicon or Intel Mac (`macOS 13.0+`) into a private, local-only motion security recorder that keeps working even while your Mac screen is locked. No cloud accounts, no subscriptions, no tracking, and zero network access enforced by the macOS App Sandbox.
-
----
-
-## Why Max Watch Exists
-
-Sometimes you just want peace of mind knowing your room, studio, office, or gear is watched while you step away and lock your screen - without sending camera feeds to someone else's cloud server or paying a monthly subscription. Max Watch is completely free and open source for anyone who needs it.
+Max Watch turns any Mac (`macOS 13.0+`, Apple Silicon & Intel) into a motion-activated webcam and USB security camera recorder that keeps recording even while your screen is locked. Every clip is encrypted in memory with `AES-256-GCM` into a password-protected local video vault, with zero cloud servers, zero accounts, zero subscriptions, and zero network access.
 
 ---
 
-## Key Features
+## Download for macOS
 
-- **Motion Detection Sliding Scale**: Smooth continuous sensitivity slider (`10%` heavy motion only up to `100%` ultra-sensitive) paired with a real-time motion level meter, visual trigger line, and live `48 kHz` AAC microphone `dB` meter. Every motion trigger records for at least 60 seconds and extends automatically without size or duration caps as long as motion continues.
-- **Works While Your Mac Screen Is Locked**: Arm Max Watch and lock your screen (`Ctrl+Cmd+Q`). Max Watch prevents idle system sleep while armed, auto-locks your video vault immediately when the screen locks, and continues capturing and encrypting new motion clips in the background.
-- **Password-Locked Secure Vault & Strictly Locked While Saving**: Every clip is encrypted in RAM before touching disk using `Curve25519` hybrid key agreement + `PBKDF2-HMAC-SHA256` (`310,000` iterations) + `AES-256-GCM`. Your vault stays strictly **locked** while Max Watch arms, watches, and saves clips (including right after setting your password and whenever returning to Live Camera), so nobody entering a room can press **Play All** or delete recordings without your password. Playback streams decrypted chunks straight from RAM via `AVAssetResourceLoader` with zero plaintext temp files ever written to disk.
-- **Saves Current Recording on Exit**: Quitting the app (`Cmd+Q`, menu quit, `SIGTERM`, or macOS logout/restart) while recording automatically flushes and encrypts the final sub-second frames before exiting.
-- **Saves Latest Recording on Sudden Power Loss**: Recordings are muxed in memory into 1-second fragmented MP4 (`fMP4`) chunks, encrypted with `AES-256-GCM`, and `fsync`ed to disk every single second. Even if power is cut mid-recording, your clip is preserved and playable right up to the last completed second.
-- **Fast-Drag Scrubber "Ball" + `1x` / `4x` / `12x` Speeds + `Save & Next` / `Delete & Next`**: Slide the glowing second ball along the timeline to scrub frames instantaneously in real time as you drag it, review clips hands-free at **Normal (`1x`)**, **`4x`**, or **`12x`** speed, and triage clips in one click with **`Save & Next`** (saves a decrypted `.mp4` to any folder you choose on your Mac and jumps to the next clip) or **`Delete & Next`** (securely zero-wipes the clip from the vault and jumps to the next clip).
-- **Universal Mac Support & Bold `MF` Dock/Menu Bar Icon**: Native universal Mach-O binary (`arm64` + `x86_64`) signed and notarized with Apple Developer ID, featuring a crisp `MF` icon in your Dock and macOS menu bar.
+Download the Apple-signed and notarized universal installer (`macOS 13.0+` Ventura, Sonoma, Sequoia, and newer on M1/M2/M3/M4 & Intel Macs) from [**GitHub Releases**](https://github.com/MaxFreedomPollard/Max-Watch/releases/latest):
+
+- [**`Max-Watch-1.1.0.dmg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.1.0/Max-Watch-1.1.0.dmg): Open the disk image and drag **Max Watch.app** into **Applications**.
+- [**`Max-Watch-1.1.0.pkg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.1.0/Max-Watch-1.1.0.pkg): Standard macOS installer package that installs directly to `/Applications/Max Watch.app`.
 
 ---
 
-## Easy Download & Install
+## Features
 
-Grab the Apple-signed & notarized universal installer from [**GitHub Releases**](https://github.com/MaxFreedomPollard/Max-Watch/releases/latest):
+### 1. Motion-Activated Video & Audio Recording (Adjustable Sensitivity Scale)
+- Smooth motion detection sensitivity slider from **`10%`** (large movement only) up to **`100%`** (subtle motion), paired with a live motion energy meter, visual trigger threshold marker, and real-time `48 kHz` AAC microphone `dB` meter.
+- Works with built-in MacBook / iMac FaceTime HD cameras, Continuity Camera, and external USB webcams or capture devices (`1080p` hardware H.264 encoding via Apple VideoToolbox).
+- Each motion event records for at least 60 seconds and extends automatically without file-size or duration limits for as long as motion continues.
 
-- **`Max-Watch-1.1.0.dmg`**: Open and drag **Max Watch.app** into **Applications**.
-- **`Max-Watch-1.1.0.pkg`**: Standard signed macOS installer package that installs directly into `/Applications/Max Watch.app`.
+### 2. Records While Your Mac Screen Is Locked
+- Click **Start Motion Detection** and lock your Mac screen (`Ctrl+Cmd+Q`).
+- Max Watch prevents idle system sleep while armed and continues monitoring your camera and encrypting motion clips in the background while your desktop stays locked.
+
+### 3. Password-Protected AES-256 Video Vault (Stays Locked While Saving)
+- Video and audio are encrypted in RAM before a single byte touches your drive using hybrid **`Curve25519`** key agreement + **`PBKDF2-HMAC-SHA256`** (`310,000` rounds) + **`AES-256-GCM`**.
+- Because recording uses your vault public key, **the vault remains strictly locked while Max Watch arms, monitors, and saves clips** (and re-locks automatically when switching to Live Camera, closing/minimizing the window, locking your screen, or leaving a paused player unattended). Nobody entering a room can press **Play All** or delete footage without your password.
+
+### 4. Power-Cut-Safe & Exit-Safe Recording
+- **Survives Sudden Power Loss**: Footage is muxed in memory into 1-second fragmented MP4 (`fMP4`) segments, encrypted with `AES-256-GCM`, and `fsync`ed to disk every second. Even if power is cut or a battery dies mid-recording, your latest clip is preserved and playable right up to the last completed second.
+- **Saves Active Clip on Exit**: Quitting the program (`Cmd+Q`, menu bar quit, `SIGTERM`, or macOS logout/restart) while recording flushes and encrypts the final sub-second frames cleanly before exiting.
+
+### 5. Password-Locked `Play All`, Fast-Drag Timeline Scrubber Ball & `1x` / `4x` / `12x` Speeds
+- Unlocking **Play All** streams decrypted segments directly from RAM via `AVAssetResourceLoader` with **zero unencrypted temporary files ever written to disk**.
+- **Fast-Drag Scrubber Ball**: Grab and slide the timeline scrubber ball across any recording to scrub through video frames instantaneously as you drag it.
+- **Multi-Speed Shuttle**: Watch clips sequentially hands-free at **Normal (`1x`)**, **`4x`**, or **`12x`** speed.
+
+### 6. One-Click `Save & Next` and `Delete & Next` Clip Triage
+- **`Save & Next` (`Cmd+S`)**: Choose any folder on your Mac outside the vault (such as `Desktop`, `Movies`, `Downloads`, or an external drive) to export a standard playable `.mp4` copy of the current clip and immediately jump to the next clip in a single click (`Cmd+Shift+S` changes your target folder anytime).
+- **`Delete & Next` (`Cmd+Delete`)**: Securely zero-wipe unwanted clips from the encrypted vault and immediately advance to play the next recording.
+
+### 7. 100% Offline Kernel Sandbox Enforcement
+- Compiled and signed with `com.apple.security.app-sandbox = true` and **without** `com.apple.security.network.client` or `com.apple.security.network.server`.
+- macOS blocks all outbound and inbound network sockets at the operating system kernel level. Nothing can ever be uploaded or transmitted anywhere.
 
 ---
 
@@ -43,18 +59,18 @@ cd Max-Watch
 ./scripts/build_universal.sh
 ```
 
-`./scripts/build_universal.sh` generates the `MF` asset catalog, compiles both `arm64` and `x86_64` slices, merges them into a universal `Max Watch.app`, and runs the 8-stage automated cryptographic, locked-while-saving, power-cut recovery, external `Save & Next` export, and `1x`/`4x`/`12x` playback self-test.
+`./scripts/build_universal.sh` generates the icon asset catalog, compiles native `arm64` and `x86_64` binaries, merges them into a universal `Max Watch.app`, and runs the 8-stage automated cryptographic, locked-while-saving, power-cut recovery, external `.mp4` export, and `1x` / `4x` / `12x` playback self-test suite.
 
 ---
 
 ## Security Architecture
 
-1. **Zero Network Entitlements**: Compiled and signed with `com.apple.security.app-sandbox = true` and **without** `com.apple.security.network.client` or `com.apple.security.network.server`. The macOS kernel denies all socket creation.
-2. **Hybrid Public-Key Capture**: `vault_manifest.json` stores your `Curve25519` public key alongside your `AES-256-GCM`-wrapped private key (derived via `310,000` rounds of `PBKDF2-HMAC-SHA256`). New motion clips derive a unique ephemeral `ECDH` + `HKDF-SHA256` 256-bit symmetric key so Max Watch can record and encrypt clips while the vault is locked and your private key is wiped from RAM.
-3. **Authenticated Chunk Framing (`MWV1`)**: Each 1-second fMP4 fragment carries a fresh 96-bit nonce and 128-bit GCM authentication tag binding the clip UUID, 64-bit chunk index, and segment type in Additional Authenticated Data (`AAD`), preventing chunk reordering or tampering.
+1. **Zero Network Entitlements**: App Sandbox profile omits all network capabilities; only camera, microphone, and user-selected file export (`NSOpenPanel` / `NSSavePanel`) are permitted.
+2. **Asymmetric Capture / Symmetric Chunk Encryption**: `vault_manifest.json` stores your `Curve25519` public key alongside your `AES-256-GCM`-wrapped private key (derived via `310,000` rounds of `PBKDF2-HMAC-SHA256`). Each recorded clip generates a fresh ephemeral `Curve25519` keypair + 256-bit `HKDF-SHA256` clip key so new clips encrypt while the private key is completely absent from memory.
+3. **Authenticated Chunk Framing (`MWV1`)**: Every 1-second `fMP4` segment uses a unique 96-bit nonce and 128-bit GCM authentication tag binding the clip UUID, 64-bit chunk index, and segment type in Additional Authenticated Data (`AAD`), preventing chunk truncation, injection, or reordering.
 
 ---
 
 ## License
 
-Released under the [MIT License](./LICENSE) as a free gift to the community by **Max Freedom Pollard**. Stay safe and take care of each other.
+Released under the [MIT License](./LICENSE).
