@@ -2779,9 +2779,9 @@ final class AppController: NSObject,
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.icon = NSApp.applicationIconImage
-        alert.messageText = "Max Watch (v1.2.0)"
+        alert.messageText = "Max Watch (v1.3.0)"
         alert.informativeText = """
-        A free, 100% offline, encrypted motion-detection security camera & video vault for Mac - gifted to the community by Max Freedom Pollard.
+        A free, 100% offline, encrypted motion-detection security camera & video vault for Mac and Windows - gifted to the community by Max Freedom Pollard.
 
         • Zero network access (sandboxed offline at the macOS kernel level)
         • Vault stays strictly locked while arming & saving clips against room tampering

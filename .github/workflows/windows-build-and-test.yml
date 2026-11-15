@@ -1,0 +1,83 @@
+name: Windows Build & 14-Stage Verification
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build-and-verify:
+    name: Build & Verify Windows 10/11 (x64 + ARM64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Inno Setup 6 is installed
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build x64 + ARM64, Run 14-Stage SelfTest, Run UI Smoke Test & Package Installer
+        shell: pwsh
+        run: |
+          ./Windows/build_windows.ps1
+
+      - name: Audit x64 & ARM64 PE Import Tables via dumpbin (Zero Network DLLs)
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstall = & $vsWhere -latest -property installationPath
+          $dumpbin = Get-ChildItem -Path $vsInstall -Recurse -Filter "dumpbin.exe" |
+                     Where-Object { $_.FullName -match "Hostx64\\x64" } |
+                     Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+
+          $forbidden = @("ws2_32.dll", "wsock32.dll", "wininet.dll", "winhttp.dll", "urlmon.dll", "dnsapi.dll", "mswsock.dll")
+          foreach ($bin in @("Windows/build/x64/Release/MaxWatch.exe", "Windows/build/arm64/Release/MaxWatch.exe")) {
+            Write-Host "=== Auditing PE Imports for $bin ==="
+            $out = (& $dumpbin /imports $bin | Out-String)
+            Write-Host ($out -split "`n" | Where-Object { $_ -match "\.dll" } | Out-String)
+            foreach ($bad in $forbidden) {
+              if ($out -match [regex]::Escape($bad)) {
+                throw "SECURITY FAILURE: $bin imports forbidden network library $bad"
+              }
+            }
+          }
+          Write-Host "PE Import Audit Passed: Zero network DLLs imported in x64 or ARM64!"
+
+      - name: Test Silent Installation & Installed Binary Execution
+        shell: pwsh
+        run: |
+          $setupExe = Resolve-Path "Windows/build/dist/Max-Watch-*-Windows-Setup.exe"
+          $testInstallDir = Join-Path $env:RUNNER_TEMP "MaxWatchInstalledTest"
+          Start-Process -FilePath $setupExe.Path -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=`"$testInstallDir`"" -Wait -NoNewWindow
+          $installedExe = Join-Path $testInstallDir "MaxWatch.exe"
+          if (!(Test-Path $installedExe)) {
+            throw "Silent installer did not produce $installedExe"
+          }
+          Write-Host "Running full 14-stage --selftest from installed MaxWatch.exe..."
+          & $installedExe --selftest (Join-Path $env:RUNNER_TEMP "InstalledSelfTestTmp")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed MaxWatch.exe --selftest failed with exit code $LASTEXITCODE"
+          }
+          Write-Host "Silent Installer + Post-Install Self-Test Passed 100%!"
+
+      - name: Upload Windows Release Binaries & Rendered UI Screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: Max-Watch-Windows-Release-Artifacts
+          path: |
+            Windows/build/dist/*.exe
+            Windows/build/dist/SHA256SUMS-Windows.txt
+            Windows/build/dist/screenshots/*.png
+          if-no-files-found: error

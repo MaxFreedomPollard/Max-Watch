@@ -1,6 +1,11 @@
 build/
+Windows/build/
 .DS_Store
 *.dmg
 *.pkg
 *.zip
+*.exe
+*.pdb
+*.obj
+*.res
 *.provisionprofile
