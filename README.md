@@ -2,8 +2,19 @@
 
 **A 100% offline, free, encrypted Mac video recorder with motion detection.**
 
-Max Watch gives every Mac a free motion-activated webcam and USB security camera recorder that keeps recording even while your screen is locked. Every clip is encrypted in memory with `AES-256-GCM` into a password-protected local video vault, with zero cloud servers, zero accounts, zero subscriptions, and zero network access.
+Max Watch gives every Mac a free motion-activated webcam and USB security camera recorder that keeps recording even while your screen is locked. Every clip is encrypted in memory with `AES-256-GCM` into a password-protected local video vault, with zero cloud servers, zero accounts, zero subscriptions, and zero network access. It's designed to save the clip it's recording even if someone shuts down the computer or closes the program, and nobody can watch the videos without your password, unless you save them to a different part of the computer. Once in "Play All" mode, it plays all the motion detected clips and you either press "delete and next" or "save and next" or just "next" if you're still deciding. No setup required besides putting in the initial password. The only free Mac security camera app that works when your screen is locked, better than any paid app for offline Mac security camera recording.
 
+Leaving the office overnight? Set this when you leave, to see if anyone is entering your office and stealing stuff.
+
+Have a child? This is a great nanny cam on the go, if you're traveling with a kid and a laptop.
+
+Are you hot? Check you're not being raped, by leaving this on in your room or wherever you sleep/party.
+
+In a hotel? Leave this on when you're out and have the do not disturb sign on, if nobody comes in it will just be the video of you leaving and coming back. Extra 4 seconds, super simple.
+
+If you have a laptop, you now have a reliable security camera program that you can leave on whenever you want. Can't believe I'm the first person to make this, should have been made 10 years ago before AI even existed, but I'm the only good person on earth clearly.
+
+Note: This does not disable the light that shows when the camera is recording. If you want to do that, black nail polish or something. I decided not to blank the light because what works on one Mac might break another Mac, and this program is truly compatible with all Macs. Old, new, ARM, Intel, Silicone, whatever, if it's a Mac it should work on your computer. If you have any technical issues, just message me on instagram or linked and I will do a new release, usually same day. If you message on Github it might be lost, because I get 10-20 messages per day on Github.
 ---
 
 ## Download for macOS
