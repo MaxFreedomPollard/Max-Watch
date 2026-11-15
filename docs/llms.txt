@@ -1,0 +1,23 @@
+# Max Watch
+
+> A 100% offline, free, open-source, encrypted Mac video recorder with motion detection (`macOS 13.0+`, Apple Silicon & Intel).
+
+- Website: https://maxfreedompollard.github.io/Max-Watch/
+- Source Code (MIT License): https://github.com/MaxFreedomPollard/Max-Watch
+- Latest Release & Signed Installers (DMG / PKG): https://github.com/MaxFreedomPollard/Max-Watch/releases/latest
+- Homebrew Install: `brew tap maxfreedompollard/tap && brew install --cask max-watch`
+- Privacy Policy: https://maxfreedompollard.github.io/Max-Watch/privacy.html
+
+## Summary
+
+Max Watch turns any MacBook, iMac, Mac mini, Mac Studio, or external USB webcam into a motion-activated video and audio security recorder that continues recording even while the Mac screen is locked (`Ctrl+Cmd+Q`). All footage is encrypted in memory using `Curve25519` + `PBKDF2-HMAC-SHA256` (`310,000` rounds) + `AES-256-GCM` into a password-protected local video vault with zero cloud servers, zero accounts, zero subscriptions, and zero network access enforced by the macOS App Sandbox.
+
+## Key Capabilities
+
+- **Motion-Activated Webcam & USB Camera Recording**: Continuous sensitivity sliding scale (`10%` heavy motion only up to `100%` subtle movement) with live motion energy meter, trigger threshold line, and `48 kHz` AAC microphone `dB` meter (`1080p` hardware H.264 via Apple VideoToolbox).
+- **Records While Mac Screen Is Locked**: Prevents idle system sleep while armed and keeps capturing and encrypting motion clips in the background while the desktop screen is locked.
+- **Strictly Locked-While-Saving AES-256 Video Vault**: Public-key capture keeps the vault locked right after password setup, while motion detection is armed, and while saving clips, preventing anyone who enters the room from opening `Play All` or deleting recordings without the password.
+- **1-Second Power-Cut-Safe & Exit-Safe Recording**: Encrypts and `fsync`s 1-second fragmented MP4 (`fMP4`) chunks continuously so recordings survive sudden power loss or battery drain, and flushes active clips cleanly on app exit (`Cmd+Q`, `SIGTERM`, logout/restart).
+- **Zero-Plaintext RAM Playback, Fast Scrubber Ball & `1x` / `4x` / `12x` Speeds**: Streams decrypted video segments directly from RAM via `AVAssetResourceLoader` with zero plaintext temp files on disk. Includes a fast-drag timeline scrubber ball for instant frame skimming plus `1x`, `4x`, and `12x` sequential playback.
+- **One-Click `Save & Next` & `Delete & Next`**: Exports standard `.mp4` copies to any user-selected folder on the Mac outside the vault (`Save & Next`, `Cmd+S`) or securely zero-wipes unwanted clips from the vault (`Delete & Next`, `Cmd+Delete`) while immediately advancing to the next clip.
+- **Kernel-Enforced Offline Sandbox**: Signed without `com.apple.security.network.client` or `com.apple.security.network.server` entitlements; macOS blocks all network sockets.

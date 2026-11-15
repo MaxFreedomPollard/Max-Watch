@@ -13,6 +13,16 @@ Download the Apple-signed and notarized universal installer (`macOS 13.0+` Ventu
 - [**`Max-Watch-1.1.0.dmg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.1.0/Max-Watch-1.1.0.dmg): Open the disk image and drag **Max Watch.app** into **Applications**.
 - [**`Max-Watch-1.1.0.pkg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.1.0/Max-Watch-1.1.0.pkg): Standard macOS installer package that installs directly to `/Applications/Max Watch.app`.
 
+Or install via **Homebrew**:
+
+```bash
+brew tap maxfreedompollard/tap
+brew install --cask max-watch
+```
+
+![Max Watch Live Motion Detection & Locked AES-256 Vault](https://maxfreedompollard.github.io/Max-Watch/assets/01_live_motion_studio.png)
+![Max Watch Fast Scrubber Ball, Save & Next, Delete & Next, and 12x Playback](https://maxfreedompollard.github.io/Max-Watch/assets/02_fast_ball_scrubber_12x.png)
+
 ---
 
 ## Features
