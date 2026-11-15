@@ -34,8 +34,7 @@ brew tap maxfreedompollard/tap
 brew install --cask max-watch
 ```
 
-![Max Watch Live Motion Detection & Locked AES-256 Vault](https://maxfreedompollard.github.io/Max-Watch/assets/01_live_motion_studio.png)
-![Max Watch Fast Scrubber Ball, Save & Next, Delete & Next, and 12x Playback](https://maxfreedompollard.github.io/Max-Watch/assets/02_fast_ball_scrubber_12x.png)
+![Max Watch Live Motion Detection & Locked AES-256 Vault](./docs/assets/01_live_motion_studio.png)
 
 ---
 
