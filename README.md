@@ -2,7 +2,7 @@
 
 **A 100% offline, free, encrypted Mac video recorder with motion detection.**
 
-Max Watch turns any Mac (`macOS 13.0+`, Apple Silicon & Intel) into a motion-activated webcam and USB security camera recorder that keeps recording even while your screen is locked. Every clip is encrypted in memory with `AES-256-GCM` into a password-protected local video vault, with zero cloud servers, zero accounts, zero subscriptions, and zero network access.
+Max Watch gives every Mac (`macOS 13.0+`, Apple Silicon & Intel) a motion-activated webcam and USB security camera recorder that keeps recording even while your screen is locked. Every clip is encrypted in memory with `AES-256-GCM` into a password-protected local video vault, with zero cloud servers, zero accounts, zero subscriptions, and zero network access.
 
 ---
 
