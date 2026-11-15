@@ -108,10 +108,40 @@ enum MaxWatchSelfTest {
             try check(postRotateReader.totalPlaintextLength == cleanReader.totalPlaintextLength,
                       "Existing encrypted clips must remain readable after password change")
 
-            print("[8/8] Verifying instant Delete & Next secure wipe...")
+            print("[8/10] Verifying instant Delete & Next secure wipe...")
             try vault.secureDeleteClip(url: powerCutURL)
             try check(!FileManager.default.fileExists(atPath: powerCutURL.path), "Deleted clip must be removed")
             try check(vault.listSummaries().count == 1, "Remaining clip count should be 1")
+
+            print("[9/10] Verifying unambiguous international bottom-left timestamp & pixel burn-in...")
+            let testDate = Date(timeIntervalSince1970: 1_794_720_934) // Nov 2026
+            let tsFull = ClipTimestampFormatter.format(testDate)
+            let tsCompact = ClipTimestampFormatter.formatCompact(testDate)
+            try check(!tsFull.contains("/") && !tsCompact.contains("/"),
+                      "Timestamp must never use ambiguous numeric slashes (got '\(tsFull)')")
+            try check(tsFull.contains("2026") && tsCompact.contains("2026"),
+                      "Timestamp must always include full 4-digit year (got '\(tsFull)')")
+            let monthWords = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            try check(monthWords.contains(where: { tsFull.contains($0) }),
+                      "Timestamp must spell out month word unambiguously (got '\(tsFull)')")
+            try verifyBottomLeftPixelStamp(date: testDate)
+
+            print("[10/10] Verifying Audio OFF (Video-Only, hasAudio=false) recording & 1x/4x/12x playback...")
+            vault.lock()
+            let videoOnlyURL = try recordSyntheticClip(
+                vault: vault,
+                durationSeconds: 2.6,
+                simulateHardPowerCut: false,
+                hasAudio: false
+            )
+            try vault.unlock(password: "new-vault-password-99")
+            let updatedSummaries = vault.listSummaries()
+            guard let voSummary = updatedSummaries.first(where: { $0.url.lastPathComponent == videoOnlyURL.lastPathComponent }) else {
+                throw VaultError.ioFailure("Missing video-only clip summary")
+            }
+            try check(!voSummary.hasAudio, "Audio-OFF clip must have hasAudio == false")
+            let voReader = try vault.openClipReader(url: videoOnlyURL)
+            try verifyPlaybackAndSpeeds(reader: voReader, label: "AudioOffVideoOnlyClip")
 
             vault.lock()
             try? FileManager.default.removeItem(at: rootDir)
@@ -123,18 +153,62 @@ enum MaxWatchSelfTest {
         }
     }
 
+    private static func verifyBottomLeftPixelStamp(date: Date) throws {
+        var pbOpt: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]]
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            1280,
+            720,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            attrs as CFDictionary,
+            &pbOpt
+        ) == kCVReturnSuccess, let pb = pbOpt else {
+            throw VaultError.ioFailure("Failed to allocate test CVPixelBuffer")
+        }
+        CVPixelBufferLockBaseAddress(pb, [])
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        guard let baseY = CVPixelBufferGetBaseAddressOfPlane(pb, 0),
+              let baseUV = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else {
+            throw VaultError.ioFailure("Missing NV12 planes")
+        }
+        let bprY = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let bprUV = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        memset(baseY, 110, bprY * 720)
+        memset(baseUV, 128, bprUV * 360)
+
+        let stamper = FrameTimestampStamper()
+        stamper.stampBottomLeftLocked(pixelBuffer: pb, date: date)
+
+        let ptrY = baseY.assumingMemoryBound(to: UInt8.self)
+        var darkenedPillPixels = 0
+        var brightGlyphPixels = 0
+        for r in 660..<718 {
+            for c in 8..<360 {
+                let v = ptrY[r * bprY + c]
+                if v < 70 { darkenedPillPixels += 1 }
+                if v > 175 { brightGlyphPixels += 1 }
+            }
+        }
+        // Top-right should remain completely untouched (luma == 110)
+        let topRightUntouched = (ptrY[40 * bprY + 1200] == 110)
+        try check(darkenedPillPixels > 500 && brightGlyphPixels > 80 && topRightUntouched,
+                  "Bottom-left timestamp must render dark pill (\(darkenedPillPixels)) + bright text (\(brightGlyphPixels)) exclusively at bottom-left")
+    }
+
     private static func recordSyntheticClip(
         vault: VaultManager,
         durationSeconds: Double,
-        simulateHardPowerCut: Bool
+        simulateHardPowerCut: Bool,
+        hasAudio: Bool = true
     ) throws -> URL {
         let width = 1280
         let height = 720
         let fps = 30
         let totalFrames = Int((durationSeconds * Double(fps)).rounded())
 
-        let clipFileWriter = try vault.createClipWriter(width: width, height: height, hasAudio: true)
-        let segWriter = try VaultSegmentWriter(clipWriter: clipFileWriter, width: width, height: height, hasAudio: true)
+        let clipFileWriter = try vault.createClipWriter(width: width, height: height, hasAudio: hasAudio)
+        let segWriter = try VaultSegmentWriter(clipWriter: clipFileWriter, width: width, height: height, hasAudio: hasAudio)
         let url = segWriter.fileURL
 
         for frameIdx in 0..<totalFrames {
@@ -143,7 +217,7 @@ enum MaxWatchSelfTest {
             if let vBuf = makeSyntheticVideoBuffer(width: width, height: height, frameIndex: frameIdx, pts: pts) {
                 segWriter.appendVideoSampleBuffer(vBuf)
             }
-            if frameIdx % 3 == 0 {
+            if hasAudio && frameIdx % 3 == 0 {
                 let audioStart = CMTime(seconds: t, preferredTimescale: 48_000)
                 if let aBuf = VaultSegmentWriter.makeSilentPCMSampleBuffer(startTime: audioStart, durationSeconds: 0.10) {
                     segWriter.appendAudioSampleBuffer(aBuf)

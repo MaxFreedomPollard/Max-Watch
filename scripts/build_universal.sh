@@ -37,6 +37,7 @@ FRAMEWORKS=(
   -framework AVKit
   -framework CoreGraphics
   -framework CoreMedia
+  -framework CoreText
   -framework CoreVideo
   -framework CryptoKit
   -framework Foundation

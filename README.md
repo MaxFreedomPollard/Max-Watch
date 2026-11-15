@@ -24,8 +24,8 @@ Note: This does not disable the light that shows when the camera is recording. I
 
 Download the Apple-signed and notarized universal installer (`macOS 13.0+` Ventura, Sonoma, Sequoia, and newer on M1/M2/M3/M4 & Intel Macs) from [**GitHub Releases**](https://github.com/MaxFreedomPollard/Max-Watch/releases/latest):
 
-- [**`Max-Watch-1.1.0.dmg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.1.0/Max-Watch-1.1.0.dmg): Open the disk image and drag **Max Watch.app** into **Applications**.
-- [**`Max-Watch-1.1.0.pkg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.1.0/Max-Watch-1.1.0.pkg): Standard macOS installer package that installs directly to `/Applications/Max Watch.app`.
+- [**`Max-Watch-1.2.0.dmg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.2.0/Max-Watch-1.2.0.dmg): Open the disk image and drag **Max Watch.app** into **Applications**.
+- [**`Max-Watch-1.2.0.pkg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.2.0/Max-Watch-1.2.0.pkg): Standard macOS installer package that installs directly to `/Applications/Max Watch.app`.
 
 Or install via **Homebrew**:
 
@@ -40,8 +40,10 @@ brew install --cask max-watch
 
 ## Features
 
-### 1. Motion-Activated Video & Audio Recording (Adjustable Sensitivity Scale)
+### 1. Motion-Activated Video & Audio Recording (Adjustable Sensitivity Scale + Audio ON/OFF Switch)
 - Smooth motion detection sensitivity slider from **`10%`** (large movement only) up to **`100%`** (subtle motion), paired with a live motion energy meter, visual trigger threshold marker, and real-time `48 kHz` AAC microphone `dB` meter.
+- **One-Click Audio ON / OFF Switch**: Toggle microphone recording ON or OFF anytime (`Cmd+Shift+A` or the studio deck switch) to record full `48 kHz` AAC sound or silent video-only clips, plus a quick playback mute toggle inside the Vault Player.
+- **Unambiguous International Bottom-Left Timestamp**: Every recorded clip embeds a small, clear local computer-time timestamp in the bottom-left corner with the month spelled out and a 4-digit year (e.g., `14 Nov 2026 • 9:35:34 PM PST` or `21:35:34 CET`), avoiding ambiguous numeric `11/12/26` dates across countries.
 - Works with built-in MacBook / iMac FaceTime HD cameras, Continuity Camera, and external USB webcams or capture devices (`1080p` hardware H.264 encoding via Apple VideoToolbox).
 - Each motion event records for at least 60 seconds and extends automatically without file-size or duration limits for as long as motion continues.
 

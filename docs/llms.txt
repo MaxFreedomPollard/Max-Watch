@@ -14,7 +14,8 @@ Max Watch turns any MacBook, iMac, Mac mini, Mac Studio, or external USB webcam 
 
 ## Key Capabilities
 
-- **Motion-Activated Webcam & USB Camera Recording**: Continuous sensitivity sliding scale (`10%` heavy motion only up to `100%` subtle movement) with live motion energy meter, trigger threshold line, and `48 kHz` AAC microphone `dB` meter (`1080p` hardware H.264 via Apple VideoToolbox).
+- **Motion-Activated Webcam & USB Camera Recording**: Continuous sensitivity sliding scale (`10%` heavy motion only up to `100%` subtle movement) with live motion energy meter, trigger threshold line, `48 kHz` AAC microphone `dB` meter, and a one-click **Audio ON / OFF switch** for recording with sound or silent video-only (`1080p` hardware H.264 via Apple VideoToolbox).
+- **Unambiguous International Bottom-Left Timestamp**: Burns the user's local computer date and time into the bottom-left of every clip using a spelled-out month and 4-digit year (e.g., `14 Nov 2026 • 21:35:34 GMT`) so dates are never ambiguous internationally.
 - **Records While Mac Screen Is Locked**: Prevents idle system sleep while armed and keeps capturing and encrypting motion clips in the background while the desktop screen is locked.
 - **Strictly Locked-While-Saving AES-256 Video Vault**: Public-key capture keeps the vault locked right after password setup, while motion detection is armed, and while saving clips, preventing anyone who enters the room from opening `Play All` or deleting recordings without the password.
 - **1-Second Power-Cut-Safe & Exit-Safe Recording**: Encrypts and `fsync`s 1-second fragmented MP4 (`fMP4`) chunks continuously so recordings survive sudden power loss or battery drain, and flushes active clips cleanly on app exit (`Cmd+Q`, `SIGTERM`, logout/restart).

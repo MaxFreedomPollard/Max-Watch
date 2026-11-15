@@ -190,6 +190,8 @@ final class AppController: NSObject,
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let audioDataOutput = AVCaptureAudioDataOutput()
 
+    private static let recordAudioPrefsKey = "MaxWatch.RecordAudioEnabled"
+
     private var videoDevices: [AVCaptureDevice] = []
     private var audioDevices: [AVCaptureDevice] = []
     private var activeVideoInput: AVCaptureDeviceInput?
@@ -197,6 +199,10 @@ final class AppController: NSObject,
     private var activeWidth: Int = 1920
     private var activeHeight: Int = 1080
     private var activeAudioActive: Bool = false
+    private var isAudioRecordingEnabled: Bool = true
+    private var sampleQueueAudioEnabled: Bool = true
+    private var needsSessionRefreshAfterClip: Bool = false
+    private var isPlayerAudioMuted: Bool = false
     private var activeCameraSummary: String = "1080p HD"
 
     // Motion Detection State (accessed on mediaSampleQueue)
@@ -244,6 +250,8 @@ final class AppController: NSObject,
     var window: NSWindow!
     private var statusItem: NSStatusItem?
     private var menuArmItem: NSMenuItem?
+    private var menuRecordAudioItem: NSMenuItem?
+    private var statusMenuRecordAudioItem: NSMenuItem?
     private var uiTimer: Timer?
 
     // Header UI
@@ -262,6 +270,7 @@ final class AppController: NSObject,
     private var previewView: CameraPreviewView!
     private var hudPrimaryLabel: NSTextField!
     private var hudRecordingBadge: NSTextField!
+    private var hudBottomLeftTimestampLabel: NSTextField!
     private var permissionRecoveryButton: NSButton!
     private var motionMeterView: StudioMeterBarView!
     private var motionReadoutLabel: NSTextField!
@@ -271,6 +280,7 @@ final class AppController: NSObject,
     private var audioReadoutLabel: NSTextField!
     private var cameraPopup: NSPopUpButton!
     private var micPopup: NSPopUpButton!
+    private var recordAudioSegmentedControl: NSSegmentedControl!
 
     // Player Stage UI
     private var lockedOverlayCard: NSView!
@@ -287,6 +297,7 @@ final class AppController: NSObject,
     private var nextClipButton: NSButton!
     private var saveAndNextButton: NSButton!
     private var deleteAndNextButton: NSButton!
+    private var playerAudioToggleButton: NSButton!
     private var chooseSaveFolderButton: NSButton!
     private var exportClipButton: NSButton!
 
@@ -306,6 +317,9 @@ final class AppController: NSObject,
 
     init(customVaultDirectory: URL? = nil) {
         self.vault = VaultManager(customVaultDirectory: customVaultDirectory)
+        let savedAudioPref = UserDefaults.standard.object(forKey: Self.recordAudioPrefsKey) as? Bool ?? true
+        self.isAudioRecordingEnabled = savedAudioPref
+        self.sampleQueueAudioEnabled = savedAudioPref
         super.init()
         recomputeThresholdFromSensitivity()
     }
@@ -466,6 +480,9 @@ final class AppController: NSObject,
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Show Main Window", action: #selector(showMainWindowAction), keyEquivalent: "0")
         fileMenu.addItem(withTitle: "Start or Stop Motion Detection", action: #selector(toggleArmedClicked), keyEquivalent: "r")
+        let recAudioMenuItem = fileMenu.addItem(withTitle: "Record Microphone Audio", action: #selector(toggleRecordAudioMenuAction), keyEquivalent: "A")
+        recAudioMenuItem.state = isAudioRecordingEnabled ? .on : .off
+        self.menuRecordAudioItem = recAudioMenuItem
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Save & Next (to Chosen Folder)", action: #selector(saveAndNextClicked), keyEquivalent: "s")
         fileMenu.addItem(withTitle: "Choose Save & Next Folder...", action: #selector(chooseSaveFolderClicked), keyEquivalent: "S")
@@ -498,6 +515,7 @@ final class AppController: NSObject,
         playMenu.addItem(withTitle: "Normal Speed (1x)", action: #selector(selectSpeed1x), keyEquivalent: "1")
         playMenu.addItem(withTitle: "Fast Speed (4x)", action: #selector(selectSpeed4x), keyEquivalent: "2")
         playMenu.addItem(withTitle: "Super Fast Speed (12x)", action: #selector(selectSpeed12x), keyEquivalent: "3")
+        playMenu.addItem(withTitle: "Toggle Playback Audio", action: #selector(togglePlayerMuteClicked), keyEquivalent: "M")
         playMenu.addItem(.separator())
         playMenu.addItem(withTitle: "Previous Clip", action: #selector(prevClipClicked), keyEquivalent: "[")
         playMenu.addItem(withTitle: "Next Clip", action: #selector(nextClipClicked), keyEquivalent: "]")
@@ -530,6 +548,9 @@ final class AppController: NSObject,
         menu.addItem(.separator())
         let armItem = menu.addItem(withTitle: "Start Motion Detection", action: #selector(toggleArmedClicked), keyEquivalent: "")
         self.menuArmItem = armItem
+        let statusAudioItem = menu.addItem(withTitle: "Record Microphone Audio", action: #selector(toggleRecordAudioMenuAction), keyEquivalent: "")
+        statusAudioItem.state = isAudioRecordingEnabled ? .on : .off
+        self.statusMenuRecordAudioItem = statusAudioItem
         menu.addItem(withTitle: "Play All (Password Protected)", action: #selector(playAllClicked), keyEquivalent: "")
         menu.addItem(withTitle: "Lock Video Vault", action: #selector(lockVaultAction), keyEquivalent: "")
         menu.addItem(.separator())
@@ -846,6 +867,19 @@ final class AppController: NSObject,
         recBox.addSubview(hudRecordingBadge)
         recBox.isHidden = true
 
+        // HUD Bottom-Left Live Unambiguous Computer-Time Stamp (matches burned-in clip bottom-left timestamp)
+        let tsBox = NSView()
+        tsBox.wantsLayer = true
+        tsBox.layer?.backgroundColor = NSColor(calibratedRed: 0.04, green: 0.06, blue: 0.10, alpha: 0.74).cgColor
+        tsBox.layer?.cornerRadius = 6
+        tsBox.layer?.borderWidth = 1
+        tsBox.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.16).cgColor
+        tsBox.translatesAutoresizingMaskIntoConstraints = false
+        recorderStageView.addSubview(tsBox)
+
+        hudBottomLeftTimestampLabel = makeLabel(ClipTimestampFormatter.format(), size: 11.5, weight: .semibold, color: NSColor(calibratedWhite: 0.96, alpha: 1.0), monoDigits: true)
+        tsBox.addSubview(hudBottomLeftTimestampLabel)
+
         permissionRecoveryButton = makeButton(title: "Open System Camera & Mic Settings", action: #selector(openPrivacySettingsClicked), tint: .systemYellow)
         permissionRecoveryButton.isHidden = true
         recorderStageView.addSubview(permissionRecoveryButton)
@@ -907,6 +941,18 @@ final class AppController: NSObject,
         micPopup.translatesAutoresizingMaskIntoConstraints = false
         deck.addSubview(micPopup)
 
+        recordAudioSegmentedControl = NSSegmentedControl(
+            labels: ["🔊 Audio ON", "🔇 Audio OFF"],
+            trackingMode: .selectOne,
+            target: self,
+            action: #selector(onRecordAudioSegmentChanged(_:))
+        )
+        recordAudioSegmentedControl.selectedSegment = isAudioRecordingEnabled ? 0 : 1
+        recordAudioSegmentedControl.segmentStyle = .rounded
+        recordAudioSegmentedControl.font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+        recordAudioSegmentedControl.translatesAutoresizingMaskIntoConstraints = false
+        deck.addSubview(recordAudioSegmentedControl)
+
         let footerInfo = makeLabel(
             "Locked-Screen Ready: Press Ctrl+Cmd+Q to lock your Mac while Max Watch keeps recording. Saves every 1s against power loss & flushes cleanly on exit.",
             size: 11.5,
@@ -943,6 +989,15 @@ final class AppController: NSObject,
             hudRecordingBadge.leadingAnchor.constraint(equalTo: recBox.leadingAnchor, constant: 12),
             hudRecordingBadge.trailingAnchor.constraint(equalTo: recBox.trailingAnchor, constant: -12),
 
+            tsBox.leadingAnchor.constraint(equalTo: previewView.leadingAnchor, constant: 12),
+            tsBox.bottomAnchor.constraint(equalTo: previewView.bottomAnchor, constant: -10),
+            tsBox.trailingAnchor.constraint(lessThanOrEqualTo: previewView.trailingAnchor, constant: -12),
+
+            hudBottomLeftTimestampLabel.topAnchor.constraint(equalTo: tsBox.topAnchor, constant: 4),
+            hudBottomLeftTimestampLabel.bottomAnchor.constraint(equalTo: tsBox.bottomAnchor, constant: -4),
+            hudBottomLeftTimestampLabel.leadingAnchor.constraint(equalTo: tsBox.leadingAnchor, constant: 9),
+            hudBottomLeftTimestampLabel.trailingAnchor.constraint(equalTo: tsBox.trailingAnchor, constant: -9),
+
             permissionRecoveryButton.centerXAnchor.constraint(equalTo: previewView.centerXAnchor),
             permissionRecoveryButton.centerYAnchor.constraint(equalTo: previewView.centerYAnchor),
             permissionRecoveryButton.heightAnchor.constraint(equalToConstant: 36),
@@ -963,6 +1018,7 @@ final class AppController: NSObject,
 
             motionReadoutLabel.centerYAnchor.constraint(equalTo: motionTitle.centerYAnchor),
             motionReadoutLabel.leadingAnchor.constraint(equalTo: motionMeterView.trailingAnchor, constant: 12),
+            motionReadoutLabel.trailingAnchor.constraint(lessThanOrEqualTo: cameraPopup.leadingAnchor, constant: -10),
 
             cameraPopup.centerYAnchor.constraint(equalTo: motionTitle.centerYAnchor),
             cameraPopup.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
@@ -978,6 +1034,7 @@ final class AppController: NSObject,
 
             sensitivityReadoutLabel.centerYAnchor.constraint(equalTo: sensTitle.centerYAnchor),
             sensitivityReadoutLabel.leadingAnchor.constraint(equalTo: sensitivitySlider.trailingAnchor, constant: 12),
+            sensitivityReadoutLabel.trailingAnchor.constraint(lessThanOrEqualTo: micPopup.leadingAnchor, constant: -10),
 
             micPopup.centerYAnchor.constraint(equalTo: sensTitle.centerYAnchor),
             micPopup.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
@@ -994,6 +1051,11 @@ final class AppController: NSObject,
 
             audioReadoutLabel.centerYAnchor.constraint(equalTo: micTitle.centerYAnchor),
             audioReadoutLabel.leadingAnchor.constraint(equalTo: audioMeterView.trailingAnchor, constant: 12),
+            audioReadoutLabel.trailingAnchor.constraint(lessThanOrEqualTo: recordAudioSegmentedControl.leadingAnchor, constant: -10),
+
+            recordAudioSegmentedControl.centerYAnchor.constraint(equalTo: micTitle.centerYAnchor),
+            recordAudioSegmentedControl.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
+            recordAudioSegmentedControl.widthAnchor.constraint(equalToConstant: 210),
 
             footerInfo.topAnchor.constraint(equalTo: micTitle.bottomAnchor, constant: 13),
             footerInfo.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
@@ -1025,6 +1087,9 @@ final class AppController: NSObject,
 
         nowPlayingMetaLabel = makeLabel("Decrypted on-the-fly in RAM • Zero temporary files written to disk", size: 11.5, weight: .regular, color: NSColor(calibratedWhite: 0.70, alpha: 1.0))
         playerHeader.addSubview(nowPlayingMetaLabel)
+
+        playerAudioToggleButton = makeButton(title: "🔊 Audio: ON", action: #selector(togglePlayerMuteClicked), tint: .systemTeal)
+        playerHeader.addSubview(playerAudioToggleButton)
 
         chooseSaveFolderButton = makeButton(title: "📁 Save Folder: Choose...", action: #selector(chooseSaveFolderClicked))
         playerHeader.addSubview(chooseSaveFolderButton)
@@ -1151,11 +1216,11 @@ final class AppController: NSObject,
 
             nowPlayingTitleLabel.topAnchor.constraint(equalTo: playerHeader.topAnchor, constant: 8),
             nowPlayingTitleLabel.leadingAnchor.constraint(equalTo: playerHeader.leadingAnchor, constant: 14),
-            nowPlayingTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseSaveFolderButton.leadingAnchor, constant: -10),
+            nowPlayingTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: playerAudioToggleButton.leadingAnchor, constant: -10),
 
             nowPlayingMetaLabel.topAnchor.constraint(equalTo: nowPlayingTitleLabel.bottomAnchor, constant: 2),
             nowPlayingMetaLabel.leadingAnchor.constraint(equalTo: nowPlayingTitleLabel.leadingAnchor),
-            nowPlayingMetaLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseSaveFolderButton.leadingAnchor, constant: -10),
+            nowPlayingMetaLabel.trailingAnchor.constraint(lessThanOrEqualTo: playerAudioToggleButton.leadingAnchor, constant: -10),
 
             backBtn.trailingAnchor.constraint(equalTo: playerHeader.trailingAnchor, constant: -14),
             backBtn.centerYAnchor.constraint(equalTo: playerHeader.centerYAnchor),
@@ -1168,6 +1233,10 @@ final class AppController: NSObject,
             chooseSaveFolderButton.trailingAnchor.constraint(equalTo: exportClipButton.leadingAnchor, constant: -8),
             chooseSaveFolderButton.centerYAnchor.constraint(equalTo: playerHeader.centerYAnchor),
             chooseSaveFolderButton.heightAnchor.constraint(equalToConstant: 32),
+
+            playerAudioToggleButton.trailingAnchor.constraint(equalTo: chooseSaveFolderButton.leadingAnchor, constant: -8),
+            playerAudioToggleButton.centerYAnchor.constraint(equalTo: playerHeader.centerYAnchor),
+            playerAudioToggleButton.heightAnchor.constraint(equalToConstant: 32),
 
             videoWrap.topAnchor.constraint(equalTo: playerHeader.bottomAnchor, constant: 10),
             videoWrap.leadingAnchor.constraint(equalTo: unlockedPlayerContent.leadingAnchor, constant: 14),
@@ -1338,25 +1407,36 @@ final class AppController: NSObject,
         } else {
             for d in aList { micPopup.addItem(withTitle: "Mic: \(d.localizedName)") }
         }
+        micPopup.isEnabled = isAudioRecordingEnabled && audioAuthorized && !aList.isEmpty
 
         let chosenVideo = vList.first(where: { $0.uniqueID == preferredVideoID }) ?? AVCaptureDevice.default(for: .video) ?? vList.first
-        let chosenAudio = audioAuthorized
+        let selectedMicDevice = audioAuthorized
             ? (aList.first(where: { $0.uniqueID == preferredAudioID }) ?? AVCaptureDevice.default(for: .audio) ?? aList.first)
             : nil
+        let chosenAudio = isAudioRecordingEnabled ? selectedMicDevice : nil
 
         if let cv = chosenVideo, let idx = vList.firstIndex(where: { $0.uniqueID == cv.uniqueID }) {
             cameraPopup.selectItem(at: idx)
         }
-        if let ca = chosenAudio, let idx = aList.firstIndex(where: { $0.uniqueID == ca.uniqueID }) {
+        if let sm = selectedMicDevice, let idx = aList.firstIndex(where: { $0.uniqueID == sm.uniqueID }) {
             micPopup.selectItem(at: idx)
         }
 
+        let audioEnabledSnapshot = isAudioRecordingEnabled
         sessionQueue.async { [weak self] in
-            self?.configureCaptureSessionOnQueue(videoDevice: chosenVideo, audioDevice: chosenAudio)
+            self?.configureCaptureSessionOnQueue(
+                videoDevice: chosenVideo,
+                audioDevice: chosenAudio,
+                audioRecordingEnabled: audioEnabledSnapshot
+            )
         }
     }
 
-    private func configureCaptureSessionOnQueue(videoDevice: AVCaptureDevice?, audioDevice: AVCaptureDevice?) {
+    private func configureCaptureSessionOnQueue(
+        videoDevice: AVCaptureDevice?,
+        audioDevice: AVCaptureDevice?,
+        audioRecordingEnabled: Bool
+    ) {
         captureSession.beginConfiguration()
 
         if let oldV = activeVideoInput {
@@ -1439,19 +1519,25 @@ final class AppController: NSObject,
             captureSession.addOutput(videoDataOutput)
         }
 
-        // Audio Data Output (Normalized 48 kHz 16-bit Mono Linear PCM -> works with all USB/built-in mics)
-        audioDataOutput.audioSettings = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false
-        ]
-        audioDataOutput.setSampleBufferDelegate(self, queue: mediaSampleQueue)
-        if !captureSession.outputs.contains(audioDataOutput), captureSession.canAddOutput(audioDataOutput) {
-            captureSession.addOutput(audioDataOutput)
+        // Audio Data Output (Normalized 48 kHz 16-bit Mono Linear PCM when Audio is ON; detached when Audio is OFF)
+        if micAttached {
+            audioDataOutput.audioSettings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false
+            ]
+            audioDataOutput.setSampleBufferDelegate(self, queue: mediaSampleQueue)
+            if !captureSession.outputs.contains(audioDataOutput), captureSession.canAddOutput(audioDataOutput) {
+                captureSession.addOutput(audioDataOutput)
+            }
+        } else {
+            if captureSession.outputs.contains(audioDataOutput) {
+                captureSession.removeOutput(audioDataOutput)
+            }
         }
 
         captureSession.commitConfiguration()
@@ -1460,7 +1546,9 @@ final class AppController: NSObject,
         }
 
         let camName = videoDevice?.localizedName ?? "Camera"
-        let micName = micAttached ? (audioDevice?.localizedName ?? "Mic") : "Video Only"
+        let micName = micAttached
+            ? (audioDevice?.localizedName ?? "Mic")
+            : (audioRecordingEnabled ? "Video Only" : "Audio Off")
         let dimsStr = "\(selectedW)x\(selectedH)"
 
         DispatchQueue.main.async { [weak self] in
@@ -1468,9 +1556,64 @@ final class AppController: NSObject,
             self.activeWidth = selectedW
             self.activeHeight = selectedH
             self.activeAudioActive = micAttached
+            if !micAttached {
+                self.latestAudioDB = -60.0
+            }
             self.activeCameraSummary = "\(camName) (\(dimsStr)) • \(micName)"
             self.updateHeaderStatusTexts()
         }
+    }
+
+    private func reapplyCurrentDeviceSelection() {
+        let camIdx = cameraPopup.indexOfSelectedItem
+        let camID = (camIdx >= 0 && camIdx < videoDevices.count) ? videoDevices[camIdx].uniqueID : nil
+        let micIdx = micPopup.indexOfSelectedItem
+        let micID = (micIdx >= 0 && micIdx < audioDevices.count) ? audioDevices[micIdx].uniqueID : nil
+        refreshDeviceListsAndConfigureSession(preferredVideoID: camID, preferredAudioID: micID)
+    }
+
+    private func syncRecordAudioControlsUI() {
+        recordAudioSegmentedControl?.selectedSegment = isAudioRecordingEnabled ? 0 : 1
+        menuRecordAudioItem?.state = isAudioRecordingEnabled ? .on : .off
+        statusMenuRecordAudioItem?.state = isAudioRecordingEnabled ? .on : .off
+        let audioAuthorized = (AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
+        micPopup?.isEnabled = isAudioRecordingEnabled && audioAuthorized && !audioDevices.isEmpty
+        if !isAudioRecordingEnabled {
+            audioMeterView?.fraction = 0.0
+            audioReadoutLabel?.stringValue = "Audio Off (Video-Only)"
+        }
+    }
+
+    private func setRecordAudioEnabled(_ enabled: Bool) {
+        guard isAudioRecordingEnabled != enabled else {
+            syncRecordAudioControlsUI()
+            return
+        }
+        isAudioRecordingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.recordAudioPrefsKey)
+        syncRecordAudioControlsUI()
+
+        mediaSampleQueue.async { [weak self] in
+            self?.sampleQueueAudioEnabled = enabled
+        }
+
+        if isRecordingClip {
+            // Do not interrupt an active motion recording mid-clip; immediately mute/unmute incoming samples
+            // and apply hardware mic attach/detach cleanly the moment this clip finishes.
+            needsSessionRefreshAfterClip = true
+        } else {
+            needsSessionRefreshAfterClip = false
+            reapplyCurrentDeviceSelection()
+        }
+        updateHeaderStatusTexts()
+    }
+
+    @objc private func onRecordAudioSegmentChanged(_ sender: NSSegmentedControl) {
+        setRecordAudioEnabled(sender.selectedSegment == 0)
+    }
+
+    @objc private func toggleRecordAudioMenuAction() {
+        setRecordAudioEnabled(!isAudioRecordingEnabled)
     }
 
     @objc private func onCameraPopupChanged(_ sender: NSPopUpButton) {
@@ -1612,6 +1755,7 @@ final class AppController: NSObject,
     }
 
     private func handleAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer, connection: AVCaptureConnection) {
+        guard sampleQueueAudioEnabled else { return }
         if let writer = activeSegmentWriter {
             writer.appendAudioSampleBuffer(sampleBuffer)
         }
@@ -1663,16 +1807,17 @@ final class AppController: NSObject,
             }
         }
         do {
+            let recordWithAudio = isAudioRecordingEnabled && activeAudioActive
             let clipWriter = try vault.createClipWriter(
                 width: activeWidth,
                 height: activeHeight,
-                hasAudio: activeAudioActive
+                hasAudio: recordWithAudio
             )
             let segWriter = try VaultSegmentWriter(
                 clipWriter: clipWriter,
                 width: activeWidth,
                 height: activeHeight,
-                hasAudio: activeAudioActive
+                hasAudio: recordWithAudio
             )
             isRecordingClip = true
             recordingStartedAt = now
@@ -1715,6 +1860,10 @@ final class AppController: NSObject,
                     if !self.isInPlayerMode && self.vault.isUnlocked {
                         self.vault.lock()
                     }
+                    if self.needsSessionRefreshAfterClip {
+                        self.needsSessionRefreshAfterClip = false
+                        self.reapplyCurrentDeviceSelection()
+                    }
                     self.refreshVaultUIState()
                     completion?()
                 }
@@ -1735,6 +1884,7 @@ final class AppController: NSObject,
 
     @objc private func onUITimerTick() {
         let now = Date()
+        hudBottomLeftTimestampLabel?.stringValue = ClipTimestampFormatter.format(now)
 
         // Motion meter & readout
         let motionFrac = min(1.0, latestMotionPercent / 12.0)
@@ -1748,12 +1898,17 @@ final class AppController: NSObject,
         )
 
         // Audio meter & readout
-        if activeAudioActive {
+        if !isAudioRecordingEnabled {
+            audioMeterView.fraction = 0.0
+            audioReadoutLabel.stringValue = "Audio Off (Video-Only)"
+        } else if activeAudioActive {
             let normDB = Double(max(0.0, min(1.0, (latestAudioDB + 55.0) / 55.0)))
             audioMeterView.fraction = normDB
             audioReadoutLabel.stringValue = String(format: "%.0f dB (48 kHz AAC)", latestAudioDB)
         } else {
             audioMeterView.fraction = 0.0
+            let auth = AVCaptureDevice.authorizationStatus(for: .audio)
+            audioReadoutLabel.stringValue = (auth == .authorized) ? "No Mic (Video-Only)" : "Mic Off (Video-Only)"
         }
 
         // Recording countdown check
@@ -2192,12 +2347,10 @@ final class AppController: NSObject,
             clipsTableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             clipsTableView.scrollRowToVisible(index)
 
-            let df = DateFormatter()
-            df.dateStyle = .medium
-            df.timeStyle = .medium
-            let stamp = df.string(from: summary.createdAt)
+            let stamp = ClipTimestampFormatter.format(summary.createdAt)
             let mb = Double(summary.fileSizeBytes) / 1_048_576.0
             let safetyTag = summary.cleanlyFinalized ? "Clean Seal" : "Recovered Power-Cut Clip"
+            let audioTag = summary.hasAudio ? "AAC Audio" : "Video-Only"
 
             nowPlayingTitleLabel.stringValue = String(
                 format: "Clip %d of %d • %@",
@@ -2206,9 +2359,10 @@ final class AppController: NSObject,
                 stamp
             )
             nowPlayingMetaLabel.stringValue = String(
-                format: "%dx%d • %.1f MB AES-256-GCM • %@ • Speed %.0fx",
+                format: "%dx%d • %@ • %.1f MB AES-256-GCM • %@ • Speed %.0fx",
                 summary.width,
                 summary.height,
+                audioTag,
                 mb,
                 safetyTag,
                 selectedPlaybackSpeed
@@ -2237,11 +2391,25 @@ final class AppController: NSObject,
     private func applyPlaybackSpeedAndPlay() {
         guard let item = player.currentItem else { return }
         item.audioTimePitchAlgorithm = .varispeed
+        player.isMuted = isPlayerAudioMuted
         // Keep crisp audio at 1x and 4x; mute audio track at 12x so CoreAudio never clamps video rate!
         for track in item.tracks where track.assetTrack?.mediaType == .audio {
-            track.isEnabled = (selectedPlaybackSpeed <= 4.0)
+            track.isEnabled = (selectedPlaybackSpeed <= 4.0) && !isPlayerAudioMuted
         }
         player.playImmediately(atRate: selectedPlaybackSpeed)
+    }
+
+    @objc private func togglePlayerMuteClicked() {
+        lastVaultInteractionAt = Date()
+        isPlayerAudioMuted.toggle()
+        player.isMuted = isPlayerAudioMuted
+        if let item = player.currentItem {
+            for track in item.tracks where track.assetTrack?.mediaType == .audio {
+                track.isEnabled = (selectedPlaybackSpeed <= 4.0) && !isPlayerAudioMuted
+            }
+        }
+        playerAudioToggleButton?.title = isPlayerAudioMuted ? "🔇 Audio: OFF" : "🔊 Audio: ON"
+        playerAudioToggleButton?.contentTintColor = isPlayerAudioMuted ? .systemOrange : .systemTeal
     }
 
     private func handleUserBallScrub(seconds: Double, isDragging: Bool) {
@@ -2561,14 +2729,15 @@ final class AppController: NSObject,
         }
 
         let item = unlockedClips[row]
-        let df = DateFormatter()
-        df.dateFormat = "MMM d, h:mm:ss a"
-        let titleText = "#\(row + 1)  \(df.string(from: item.createdAt))"
+        let stamp = ClipTimestampFormatter.formatCompact(item.createdAt)
+        let titleText = "#\(row + 1)  \(stamp)"
         let mb = Double(item.fileSizeBytes) / 1_048_576.0
-        let subText = String(format: "%.0fs • %.1f MB • %@%@",
+        let audioNote = item.hasAudio ? "" : " • No Audio"
+        let subText = String(format: "%.0fs • %.1f MB • %@%@%@",
                              item.estimatedDurationSeconds,
                              mb,
                              "\(item.width)x\(item.height)",
+                             audioNote,
                              item.cleanlyFinalized ? "" : " • Recovered")
 
         (cell.viewWithTag(101) as? NSTextField)?.stringValue = titleText
@@ -2610,13 +2779,15 @@ final class AppController: NSObject,
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.icon = NSApp.applicationIconImage
-        alert.messageText = "Max Watch (v1.1.0)"
+        alert.messageText = "Max Watch (v1.2.0)"
         alert.informativeText = """
         A free, 100% offline, encrypted motion-detection security camera & video vault for Mac - gifted to the community by Max Freedom Pollard.
 
         • Zero network access (sandboxed offline at the macOS kernel level)
         • Vault stays strictly locked while arming & saving clips against room tampering
         • Works continuously even while your Mac screen is locked
+        • Unambiguous international computer-time stamp on every clip
+        • One-click Audio ON / OFF switch for video-with-audio or silent video-only capture
         • AES-256-GCM encrypted vault + password-locked Play All
         • 1-second power-cut-safe recording + clean exit save
         • Fast-drag timeline scrubber ball + 1x / 4x / 12x playback
