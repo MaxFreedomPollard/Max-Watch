@@ -15,13 +15,18 @@ PKG_PATH="$DEV_DIR/Max-Watch-${VERSION}.pkg"
 SUMS_PATH="$DEV_DIR/SHA256SUMS.txt"
 
 if ! command -v gh >/dev/null 2>&1; then
-  echo "ERROR: GitHub CLI (gh) is not installed. Run: brew install gh && gh auth login" >&2
-  exit 1
+  if command -v brew >/dev/null 2>&1; then
+    echo "Installing GitHub CLI (gh) via Homebrew..."
+    brew install gh
+  else
+    echo "ERROR: GitHub CLI (gh) is not installed." >&2
+    exit 1
+  fi
 fi
 
 if ! gh auth status >/dev/null 2>&1; then
-  echo "ERROR: GitHub CLI is not logged in. Run: gh auth login" >&2
-  exit 1
+  echo "Signing in to GitHub in your browser (click Authorize if prompted)..."
+  gh auth login -h github.com -p https -w
 fi
 
 echo "=== [Step 1/4] Building Universal (arm64 + x86_64) Max Watch ${VERSION} & Running 12-Stage Self-Test ==="
@@ -30,6 +35,9 @@ chmod +x "$ROOT_DIR/scripts/build_universal.sh" "$ROOT_DIR/scripts/package_devel
 
 echo "=== [Step 2/4] Signing & Notarizing Max Watch ${VERSION} (.app, .dmg, .pkg) ==="
 "$ROOT_DIR/scripts/package_developer_id.sh"
+
+mkdir -p "$HOME/Desktop/Max-Watch-${VERSION}-Mac"
+cp -f "$DMG_PATH" "$PKG_PATH" "$SUMS_PATH" "$HOME/Desktop/Max-Watch-${VERSION}-Mac/"
 
 echo "=== [Step 3/4] Uploading Signed & Notarized macOS .dmg and .pkg to ${TAG} ==="
 gh release upload "$TAG" \
