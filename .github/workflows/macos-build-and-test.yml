@@ -14,7 +14,7 @@ permissions:
 jobs:
   macos-universal-build-and-verify:
     name: Build & Verify macOS Universal (arm64 + x86_64)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

@@ -1292,7 +1292,10 @@ void AppWindow::drawSoundCheckpointPopup(
     float norm = static_cast<float>(std::clamp((sens - 10.0) / 90.0, 0.0, 1.0));
     float knobX = leftX + norm * span;
 
-    const float cardW = 352.0f;
+    std::wstring exLine = std::wstring(L"Picks up: ") + cp.examples;
+    const float measuredExW = measureTextWidth(exLine, fmtSubSmall_.Get(), 620.0f) + 28.0f;
+    const float maxAllowedW = std::max(352.0f, stageRight - stageLeft - 16.0f);
+    const float cardW = std::clamp(std::max(396.0f, measuredExW), 352.0f, maxAllowedW);
     const float cardH = 74.0f;
     const float arrowH = 8.0f;
     float cardLeft = std::clamp(knobX - cardW * 0.5f, stageLeft + 8.0f, std::max(stageLeft + 8.0f, stageRight - 8.0f - cardW));
@@ -1342,7 +1345,6 @@ void AppWindow::drawSoundCheckpointPopup(
         rgba(1.0f, 1.0f, 1.0f, 1.0f)
     );
 
-    std::wstring exLine = std::wstring(L"Picks up: ") + cp.examples;
     drawTextLine(
         rt, exLine, fmtSubSmall_.Get(),
         D2D1::RectF(cardR.left + 12.0f, cardR.top + 47.0f, cardR.right - 12.0f, cardR.bottom - 5.0f),
