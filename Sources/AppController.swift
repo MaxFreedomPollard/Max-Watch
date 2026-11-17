@@ -2188,7 +2188,8 @@ final class AppController: NSObject,
     }
 
     private func hasSufficientVaultDiskSpace(minimumBytes: Int64 = 200 * 1024 * 1024) -> Bool {
-        if let vals = try? vault.vaultDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) {
+        let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
+        if let vals = try? vault.vaultDirectoryURL.resourceValues(forKeys: keys) {
             if let important = vals.volumeAvailableCapacityForImportantUsage, important > 0 {
                 return important >= minimumBytes
             }
