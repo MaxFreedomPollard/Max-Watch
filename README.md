@@ -48,16 +48,24 @@ Download the Windows installer or zero-install portable `.exe` (`Windows 10` & `
 
 ## Features
 
-### 1. Motion-Activated Video & Audio Recording (Adjustable Sensitivity Scale + Audio ON/OFF Switch)
-- Smooth motion detection sensitivity slider from **`10%`** (large movement only) up to **`100%`** (subtle motion), paired with a live motion energy meter, visual trigger threshold marker, and real-time `48 kHz` AAC microphone `dB` meter.
+### 1. Motion-Activated + Additive `"Also Wake on Sound?"` Recording (Pop-Up Sound Checkpoints & 1.25s RAM Pre-Roll)
+- **Motion Detection (Always Active When Armed)**: Smooth motion sensitivity slider from **`10%`** (large movement only) up to **`100%`** (subtle motion), paired with a live motion energy meter, visual trigger threshold marker, and **adaptive night-contrast detection** that automatically increases low-light silhouette sensitivity in dark rooms.
+- **`"Also Wake on Sound?"` (Strictly Additive — Never Replaces Motion)**: Optional toggle to wake and record on acoustic events *in addition to* motion (`motion || sound`), using an `85 Hz` high-pass filter (rejecting HVAC / fan rumble) and `2-of-3` window debounce. Dragging or hovering the sound slider pops up real-world sound-level checkpoints:
+  - **`15%` (`-12 dB`)** — *"Door Slam / Shout / Alarm"* (loud impacts, shouting, glass break, smoke alarms)
+  - **`35%` (`-21 dB`)** — *"Loud Voice / Knock / Bark"* (raised voice, firm door knock, dog bark, dropped object)
+  - **`55%` (`-30 dB`, default)** — *"Normal Talking Voice"* (everyday conversation in room, phone/TV audio, door opening)
+  - **`78%` (`-40 dB`)** — *"Quiet Voice / Footsteps"* (soft talking across room, footsteps, keys, doorknob turn)
+  - **`95%` (`-48 dB`)** — *"Whisper / Soft Rustle"* (faint whisper, tiptoeing, fabric or paper rustle in quiet rooms)
+- **1.25-Second RAM Pre-Roll Ring Buffer**: Continuously buffers the last `1.25s` of video and audio purely in RAM while armed (securely zero-wiped on disarm, zero disk writes) so every triggered clip captures the moment *right before* a knock, voice, or motion event.
 - **One-Click Audio ON / OFF Switch**: Toggle microphone recording ON or OFF anytime (`Cmd+Shift+A` on Mac / `Ctrl+Shift+A` on Windows, or the studio deck switch) to record full `48 kHz` AAC sound or silent video-only clips, plus a quick playback mute toggle inside the Vault Player.
 - **Unambiguous International Bottom-Left Timestamp**: Every recorded clip embeds a small, clear local computer-time timestamp in the bottom-left corner with the month spelled out and a 4-digit year (e.g., `14 Nov 2026 • 9:35:34 PM PST` or `21:35:34 CET`), avoiding ambiguous numeric `11/12/26` dates across countries.
 - Works with built-in laptop / desktop webcams, Continuity Camera, and external USB webcams or capture devices (`1080p` hardware H.264 encoding via Apple VideoToolbox on Mac and Windows Media Foundation on Windows).
-- Each motion event records for at least 60 seconds and extends automatically without file-size or duration limits for as long as motion continues.
+- Each motion or sound event records for at least 60 seconds and extends automatically without file-size or duration limits for as long as activity continues.
 
-### 2. Records While Your Mac or Windows Screen Is Locked
+### 2. Records While Screen Is Locked + Default-ON `Max Brightness When Locked` Night Illumination
 - Click **Start Motion Detection** and lock your screen (`Ctrl+Cmd+Q` on Mac or `Win+L` on Windows).
-- Max Watch prevents idle system sleep (including Windows Modern Standby) while armed and continues monitoring your camera and encrypting motion clips in the background while your desktop stays locked.
+- Max Watch prevents idle system sleep (including Windows Modern Standby) while armed and continues monitoring your camera and microphone in the background while your desktop stays locked.
+- **`☀ Max Brightness When Locked` (Checked by Default, Uncheckable Anytime)**: When armed and your screen is locked, Max Watch keeps your lock screen / screensaver awake at **100% maximum display brightness** so your screen illuminates pitch-dark rooms at night for clear camera visibility—and automatically restores your exact prior screen brightness the instant you unlock, disarm, uncheck the option, or quit.
 
 ### 3. Password-Protected AES-256 Video Vault (Stays Locked While Saving)
 - Video and audio are encrypted in RAM before a single byte touches your drive using hybrid **`Curve25519`** key agreement + **`PBKDF2-HMAC-SHA256`** (`310,000` rounds) + **`AES-256-GCM`**.
@@ -92,7 +100,7 @@ cd Max-Watch
 ./scripts/build_universal.sh
 ```
 
-`./scripts/build_universal.sh` generates the icon asset catalog, compiles native `arm64` and `x86_64` binaries, merges them into a universal `Max Watch.app`, and runs the automated cryptographic, locked-while-saving, power-cut recovery, external `.mp4` export, and `1x` / `4x` / `12x` playback self-test suite.
+`./scripts/build_universal.sh` generates the icon asset catalog, compiles native `arm64` and `x86_64` binaries, merges them into a universal `Max Watch.app`, and runs the 12-stage automated cryptographic, locked-while-saving, power-cut recovery, sound-wake, night-brightness restoration, external `.mp4` export, and `1x` / `4x` / `12x` playback self-test suite.
 
 ### Windows (`Windows 10 / 11` with Visual Studio 2022/2026 C++ & CMake)
 
@@ -102,7 +110,7 @@ cd Max-Watch
 ./Windows/build_windows.ps1
 ```
 
-`./Windows/build_windows.ps1` compiles standalone static (`x64` and `ARM64`) native Win32/Direct2D/Media Foundation/BCrypt executables, runs the 14-stage automated verification suite (including cross-OS vault compatibility and PE import zero-network audit), runs the Direct2D UI smoke test, and builds the universal `Setup.exe` installer.
+`./Windows/build_windows.ps1` compiles standalone static (`x64` and `ARM64`) native Win32/Direct2D/Media Foundation/BCrypt executables, runs the 16-stage automated verification suite (including cross-OS vault compatibility, additive sound-wake detection, default-ON locked screen brightness restoration, and PE import zero-network audit), runs the Direct2D UI smoke test, and builds the universal `Setup.exe` installer.
 
 ---
 

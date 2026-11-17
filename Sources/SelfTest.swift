@@ -18,7 +18,7 @@ enum MaxWatchSelfTest {
             let vaultDir = rootDir.appendingPathComponent("TestVault", isDirectory: true)
             try? FileManager.default.removeItem(at: vaultDir)
 
-            print("[1/8] Initializing AES-256-GCM + Curve25519 Vault (verifying starts LOCKED)...")
+            print("[1/12] Initializing AES-256-GCM + Curve25519 Vault (verifying starts LOCKED)...")
             let vault = VaultManager(customVaultDirectory: vaultDir)
             try vault.initializeVault(password: "chill-max-watch-2026")
             try check(vault.isInitialized && !vault.isUnlocked, "Vault must remain LOCKED immediately after initialization")
@@ -33,7 +33,7 @@ enum MaxWatchSelfTest {
             try check(rejectedWrongPassword, "Wrong password must be rejected")
             try check(!vault.isUnlocked, "Vault must still be locked after wrong password")
 
-            print("[2/8] Recording Clip #1 while Vault is LOCKED, then simulating HARD POWER CUT...")
+            print("[2/12] Recording Clip #1 while Vault is LOCKED, then simulating HARD POWER CUT...")
             let powerCutURL = try recordSyntheticClip(
                 vault: vault,
                 durationSeconds: 3.8,
@@ -41,7 +41,7 @@ enum MaxWatchSelfTest {
             )
             try check(!vault.isUnlocked, "Vault must stay LOCKED while saving Clip #1")
 
-            print("[3/8] Recording Clip #2 while Vault is LOCKED, then flushing cleanly (Exit-Safe)...")
+            print("[3/12] Recording Clip #2 while Vault is LOCKED, then flushing cleanly (Exit-Safe)...")
             let cleanExitURL = try recordSyntheticClip(
                 vault: vault,
                 durationSeconds: 3.4,
@@ -66,7 +66,7 @@ enum MaxWatchSelfTest {
             }
             try check(blockedWhileLocked, "Opening clip reader must fail while vault is locked")
 
-            print("[4/8] Unlocking Vault and verifying Power-Cut Clip recovery + Clean-Exit Clip...")
+            print("[4/12] Unlocking Vault and verifying Power-Cut Clip recovery + Clean-Exit Clip...")
             try vault.unlock(password: "chill-max-watch-2026")
             try check(vault.isUnlocked, "Vault should unlock with valid password")
 
@@ -81,11 +81,11 @@ enum MaxWatchSelfTest {
             try check(cleanReader.header.cleanlyFinalized, "Clean-exit clip should be marked cleanly finalized")
             try check(cleanReader.mediaFragmentCount >= 3, "Clean-exit clip must have >= 3 media segments (got \(cleanReader.mediaFragmentCount))")
 
-            print("[5/8] Verifying zero-disk-plaintext RAM playback at 1x, 4x, and 12x speeds + fast ball seeking...")
+            print("[5/12] Verifying zero-disk-plaintext RAM playback at 1x, 4x, and 12x speeds + fast ball seeking...")
             try verifyPlaybackAndSpeeds(reader: powerCutReader, label: "PowerCutRecoveredClip")
             try verifyPlaybackAndSpeeds(reader: cleanReader, label: "CleanExitClip")
 
-            print("[6/8] Verifying Save & Next MP4 export to external chosen folder...")
+            print("[6/12] Verifying Save & Next MP4 export to external chosen folder...")
             let externalSaveDir = rootDir.appendingPathComponent("ExternalUserChosenFolder", isDirectory: true)
             try FileManager.default.createDirectory(at: externalSaveDir, withIntermediateDirectories: true)
             let exportedMP4 = try vault.exportClipToDirectory(clipURL: cleanExitURL, directoryURL: externalSaveDir)
@@ -93,7 +93,7 @@ enum MaxWatchSelfTest {
             let exportedSize = (exportedAttrs[.size] as? NSNumber)?.int64Value ?? 0
             try check(exportedSize > 10_000, "Exported MP4 should be non-empty (got \(exportedSize) bytes)")
 
-            print("[7/8] Verifying O(1) Vault Password Change & re-unlock...")
+            print("[7/12] Verifying O(1) Vault Password Change & re-unlock...")
             try vault.changePassword(currentPassword: "chill-max-watch-2026", newPassword: "new-vault-password-99")
             vault.lock()
             var oldPassRejected = false
@@ -108,12 +108,12 @@ enum MaxWatchSelfTest {
             try check(postRotateReader.totalPlaintextLength == cleanReader.totalPlaintextLength,
                       "Existing encrypted clips must remain readable after password change")
 
-            print("[8/10] Verifying instant Delete & Next secure wipe...")
+            print("[8/12] Verifying instant Delete & Next secure wipe...")
             try vault.secureDeleteClip(url: powerCutURL)
             try check(!FileManager.default.fileExists(atPath: powerCutURL.path), "Deleted clip must be removed")
             try check(vault.listSummaries().count == 1, "Remaining clip count should be 1")
 
-            print("[9/10] Verifying unambiguous international bottom-left timestamp & pixel burn-in...")
+            print("[9/12] Verifying unambiguous international bottom-left timestamp & pixel burn-in...")
             let testDate = Date(timeIntervalSince1970: 1_794_720_934) // Nov 2026
             let tsFull = ClipTimestampFormatter.format(testDate)
             let tsCompact = ClipTimestampFormatter.formatCompact(testDate)
@@ -126,7 +126,7 @@ enum MaxWatchSelfTest {
                       "Timestamp must spell out month word unambiguously (got '\(tsFull)')")
             try verifyBottomLeftPixelStamp(date: testDate)
 
-            print("[10/10] Verifying Audio OFF (Video-Only, hasAudio=false) recording & 1x/4x/12x playback...")
+            print("[10/12] Verifying Audio OFF (Video-Only, hasAudio=false) recording & 1x/4x/12x playback...")
             vault.lock()
             let videoOnlyURL = try recordSyntheticClip(
                 vault: vault,
@@ -143,9 +143,15 @@ enum MaxWatchSelfTest {
             let voReader = try vault.openClipReader(url: videoOnlyURL)
             try verifyPlaybackAndSpeeds(reader: voReader, label: "AudioOffVideoOnlyClip")
 
+            print("[11/12] Verifying SoundDetector checkpoints ('Normal Talking Voice') & 85Hz HPF acoustic wake...")
+            try verifySoundDetectorAndCheckpoints()
+
+            print("[12/12] Verifying Default-ON Max Brightness When Locked boost/restore & Night Motion Floor...")
+            try verifyLockedBrightnessAndNightVision()
+
             vault.lock()
             try? FileManager.default.removeItem(at: rootDir)
-            print("ALL MAX WATCH SELF-TESTS PASSED 100%.")
+            print("ALL 12 MAX WATCH SELF-TESTS PASSED 100%.")
             return 0
         } catch {
             fputs("SELF-TEST FAILED: \(error.localizedDescription)\n", stderr)
@@ -381,5 +387,134 @@ enum MaxWatchSelfTest {
             return nil
         }
         return sampleBuffer
+    }
+
+    private static func verifySoundDetectorAndCheckpoints() throws {
+        try check(SoundSensitivityCheckpoint.all.count == 5, "Expected 5 sound sensitivity checkpoints")
+        let defCP = SoundSensitivityCheckpoint.nearest(toPercent: SoundDetector.defaultSensitivityPercent)
+        try check(defCP.title == "Normal Talking Voice",
+                  "Default 55% checkpoint must be 'Normal Talking Voice', got '\(defCP.title)'")
+        try check(abs(SoundDetector.thresholdDB(forPercent: 55.0) - (-30.0)) < 0.01,
+                  "55% sound sensitivity must map to -30.0 dB")
+        try check(SoundSensitivityCheckpoint.snapIfClose(56.1) == 55.0,
+                  "Checkpoint magnetic snap should snap 56.1% to 55.0%")
+
+        let detector = SoundDetector()
+        detector.setSensitivityPercent(55.0) // -30.0 dB
+        detector.setEnabled(true)
+        detector.reset(warmupUntilTimestamp: 10.0)
+
+        // 1. Sub-bass 20 Hz rumble at -25 dBFS (attenuated well below -30 dB by 85 Hz HPF -> must NOT trigger)
+        var lowHum = [Int16](repeating: 0, count: 4800 * 2) // 200 ms @ 48 kHz
+        for i in 0..<lowHum.count {
+            let amp = 0.056 * 32767.0 * sin(2.0 * Double.pi * 20.0 * Double(i) / 48_000.0)
+            lowHum[i] = Int16(amp)
+        }
+        let humEval = lowHum.withUnsafeBufferPointer { buf in
+            detector.analyzePCM16Mono(samples: buf.baseAddress!, count: buf.count, sampleRate: 48_000, nowTimestamp: 12.0)
+        }
+        try check(!humEval.triggered, "20 Hz sub-bass rumble must be rejected by 85 Hz HPF (got dB=\(humEval.filteredDB))")
+
+        // 2. Single 50 ms brief click at 1 kHz (-18 dBFS) -> 1 window only -> must NOT trigger (requires 2-of-3 windows)
+        detector.reset(warmupUntilTimestamp: 10.0)
+        var oneWindowTone = [Int16](repeating: 0, count: 2400) // 50 ms
+        for i in 0..<oneWindowTone.count {
+            oneWindowTone[i] = Int16(0.18 * 32767.0 * sin(2.0 * Double.pi * 1000.0 * Double(i) / 48_000.0))
+        }
+        let singleClickEval = oneWindowTone.withUnsafeBufferPointer { buf in
+            detector.analyzePCM16Mono(samples: buf.baseAddress!, count: buf.count, sampleRate: 48_000, nowTimestamp: 12.0)
+        }
+        try check(!singleClickEval.triggered, "Single 50ms impulse must be debounced (requires >=2 of 3 windows)")
+
+        // 3. Second 50 ms window of 1 kHz voice-band energy (-18 dBFS) -> 2 of 3 windows -> MUST trigger!
+        let voiceTriggerEval = oneWindowTone.withUnsafeBufferPointer { buf in
+            detector.analyzePCM16Mono(samples: buf.baseAddress!, count: buf.count, sampleRate: 48_000, nowTimestamp: 12.06)
+        }
+        try check(voiceTriggerEval.triggered, "Sustained 100ms 1kHz voice-level audio must trigger SoundDetector")
+
+        // 4. Disabled detector must never trigger even on loud audio
+        detector.setEnabled(false)
+        let disabledEval = oneWindowTone.withUnsafeBufferPointer { buf in
+            detector.analyzePCM16Mono(samples: buf.baseAddress!, count: buf.count, sampleRate: 48_000, nowTimestamp: 12.20)
+        }
+        try check(!disabledEval.triggered, "Disabled SoundDetector must never trigger")
+    }
+
+    private static func verifyLockedBrightnessAndNightVision() throws {
+        // Verify adaptive night-contrast cell delta floor
+        try check(AppController.adaptiveCellDeltaFloor(meanLuma: 120.0) == 14, "Daylight luma floor must be 14")
+        try check(AppController.adaptiveCellDeltaFloor(meanLuma: 12.0) == 9, "Pitch-dark luma floor must adapt to 9")
+        let twilightFloor = AppController.adaptiveCellDeltaFloor(meanLuma: 34.0)
+        try check(twilightFloor >= 10 && twilightFloor <= 13, "Dim luma floor should interpolate smoothly (got \(twilightFloor))")
+
+        // Verify SleepAndLockManager default-ON locked brightness boost & exact restoration
+        let mockBackend = MockDisplayBrightnessBackend(initialBrightness: 0.34)
+        let mgr = SleepAndLockManager(
+            brightnessBackend: mockBackend,
+            registerSystemNotifications: false,
+            enableSystemPowerAssertions: false
+        )
+        try check(mgr.maxBrightnessWhenLockedEnabled == true,
+                  "Max Brightness When Locked MUST be checked (true) by default")
+
+        // Arming while screen is UNLOCKED must NOT change user's screen brightness
+        mgr.setArmedPreventingIdleSleep(true)
+        try check(abs(mockBackend.currentBrightness - 0.34) < 0.001,
+                  "Arming while unlocked must keep user brightness at 0.34 (got \(mockBackend.currentBrightness))")
+
+        // Locking screen while armed (with default ON) MUST boost brightness to 100% (1.0)
+        mgr.simulateScreenLockStateForTesting(true)
+        try check(mgr.isBrightnessBoostActive && abs(mockBackend.currentBrightness - 1.0) < 0.001,
+                  "Locking screen while armed must boost brightness to 1.0 (got \(mockBackend.currentBrightness))")
+
+        // Simulate ambient-light auto-dimming to 0.50 while locked, then periodic maintenance tick -> re-boosts to 1.0 WITHOUT losing saved 0.34!
+        mockBackend.currentBrightness = 0.50
+        mgr.periodicMaintenanceTick(now: Date().addingTimeInterval(5.0))
+        try check(abs(mockBackend.currentBrightness - 1.0) < 0.001,
+                  "Periodic maintenance must keep locked display at 1.0 against auto-dimming")
+
+        // Unchecking option while locked restores original 0.34 immediately
+        mgr.maxBrightnessWhenLockedEnabled = false
+        try check(!mgr.isBrightnessBoostActive && abs(mockBackend.currentBrightness - 0.34) < 0.001,
+                  "Unchecking Max Brightness When Locked must restore original 0.34 (got \(mockBackend.currentBrightness))")
+
+        // Re-checking while still armed & locked boosts back to 1.0
+        mgr.maxBrightnessWhenLockedEnabled = true
+        try check(mgr.isBrightnessBoostActive && abs(mockBackend.currentBrightness - 1.0) < 0.001,
+                  "Re-checking option while armed & locked must boost to 1.0")
+
+        // Unlocking screen restores exact original 0.34
+        mgr.simulateScreenLockStateForTesting(false)
+        try check(!mgr.isBrightnessBoostActive && abs(mockBackend.currentBrightness - 0.34) < 0.001,
+                  "Unlocking screen must restore exact original brightness 0.34 (got \(mockBackend.currentBrightness))")
+
+        // Lock again -> 1.0, then disarm -> restores 0.34
+        mgr.simulateScreenLockStateForTesting(true)
+        try check(abs(mockBackend.currentBrightness - 1.0) < 0.001, "Expected 1.0 on second lock")
+        mgr.setArmedPreventingIdleSleep(false)
+        try check(abs(mockBackend.currentBrightness - 0.34) < 0.001,
+                  "Disarming must restore original brightness 0.34")
+    }
+}
+
+private final class MockDisplayBrightnessBackend: DisplayBrightnessBackend {
+    var currentBrightness: Float
+
+    init(initialBrightness: Float) {
+        self.currentBrightness = initialBrightness
+    }
+
+    func snapshotBrightnessByDisplay() -> [UInt32: Float] {
+        return [1: currentBrightness]
+    }
+
+    func setAllDisplaysBrightness(_ level: Float) {
+        currentBrightness = max(0.0, min(1.0, level))
+    }
+
+    func restoreBrightnessByDisplay(_ saved: [UInt32: Float]) {
+        if let v = saved[1] {
+            currentBrightness = v
+        }
     }
 }

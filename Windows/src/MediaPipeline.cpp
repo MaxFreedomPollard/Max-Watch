@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cwchar>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -48,12 +49,33 @@ double monotonicNowSeconds() {
     return std::chrono::duration<double>(now).count();
 }
 
+#ifdef _WIN32
+int64_t currentUnixMillis() {
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+}
+
+void secureZeroPcm(std::vector<int16_t>& pcm) {
+    if (!pcm.empty()) {
+        SecureZeroMemory(pcm.data(), pcm.size() * sizeof(int16_t));
+        pcm.clear();
+    }
+}
+#endif
+
 } // namespace
 
 // MARK: - MotionDetector
 
 MotionDetector::MotionDetector() {
     setSensitivityPercent(78.0);
+}
+
+int MotionDetector::adaptiveCellDeltaFloor(double meanLuma) {
+    if (meanLuma >= 50.0) return 14;
+    if (meanLuma <= 18.0) return 9;
+    double t = (meanLuma - 18.0) / 32.0;
+    return 9 + static_cast<int>(std::lround(t * 5.0));
 }
 
 void MotionDetector::setSensitivityPercent(double pct) {
@@ -116,6 +138,7 @@ MotionDetector::EvalResult MotionDetector::analyzeNV12Luma(
     }
 
     double mean = static_cast<double>(sum) / static_cast<double>(kCount);
+    int cellFloor = adaptiveCellDeltaFloor(mean);
     double scorePct = 0.0;
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -125,7 +148,7 @@ MotionDetector::EvalResult MotionDetector::analyzeNV12Luma(
         for (int i = 0; i < kCount; ++i) {
             int adjusted = static_cast<int>(grid[i]) - globalShift;
             int diff = std::abs(adjusted - static_cast<int>(prevGrid_[i]));
-            if (diff > 14) changed++;
+            if (diff > cellFloor) changed++;
         }
         scorePct = (static_cast<double>(changed) / static_cast<double>(kCount)) * 100.0;
     }
@@ -142,8 +165,177 @@ MotionDetector::EvalResult MotionDetector::analyzeNV12Luma(
     }
 
     res.scorePercent = scorePct;
+    res.meanLuma = mean;
     res.triggered = hit;
     return res;
+}
+
+// MARK: - SoundSensitivityCheckpoint & SoundDetector
+
+double SoundSensitivityCheckpoint::thresholdDB() const {
+    return SoundDetector::thresholdDBForPercent(percent);
+}
+
+const std::array<SoundSensitivityCheckpoint, 5>& SoundSensitivityCheckpoint::all() {
+    static const std::array<SoundSensitivityCheckpoint, 5> kCheckpoints{{
+        {15.0, L"Door Slam / Shout / Alarm", L"Only loud impacts, shouting, glass break, or smoke alarms"},
+        {35.0, L"Loud Voice / Knock / Bark", L"Raised voice, firm door knock, dog bark, dropped object"},
+        {55.0, L"Normal Talking Voice",      L"Everyday conversation in room, phone/TV audio, door opening"},
+        {78.0, L"Quiet Voice / Footsteps",   L"Soft talking across room, footsteps, keys, doorknob turn"},
+        {95.0, L"Whisper / Soft Rustle",     L"Faint whisper, tiptoeing, fabric or paper rustle (quiet rooms)"}
+    }};
+    return kCheckpoints;
+}
+
+SoundSensitivityCheckpoint SoundSensitivityCheckpoint::nearest(double pct) {
+    double clamped = std::clamp(pct, 10.0, 100.0);
+    const auto& cps = all();
+    SoundSensitivityCheckpoint best = cps[2];
+    double bestDist = 1e9;
+    for (const auto& cp : cps) {
+        double d = std::abs(cp.percent - clamped);
+        if (d < bestDist) {
+            bestDist = d;
+            best = cp;
+        }
+    }
+    return best;
+}
+
+double SoundSensitivityCheckpoint::snapIfClose(double rawPercent, double tolerance) {
+    double clamped = std::clamp(rawPercent, 10.0, 100.0);
+    for (const auto& cp : all()) {
+        if (std::abs(cp.percent - clamped) <= tolerance) {
+            return cp.percent;
+        }
+    }
+    return clamped;
+}
+
+SoundDetector::SoundDetector() {
+    setSensitivityPercent(kDefaultSensitivityPercent);
+}
+
+double SoundDetector::thresholdDBForPercent(double percent) {
+    double clamped = std::clamp(percent, 10.0, 100.0);
+    // 10% -> -10.0 dB, 55% -> -30.0 dB ("Normal Talking Voice"), 100% -> -50.0 dB
+    return -10.0 - ((clamped - 10.0) / 90.0) * 40.0;
+}
+
+double SoundDetector::meterFractionForDB(double db) {
+    return std::clamp((db + 60.0) / 60.0, 0.0, 1.0);
+}
+
+void SoundDetector::setEnabled(bool enabled) {
+    enabled_.store(enabled);
+    if (!enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        recentWindowHits_ = {false, false, false};
+    }
+}
+
+void SoundDetector::setSensitivityPercent(double pct) {
+    double clamped = std::clamp(pct, 10.0, 100.0);
+    sensitivityPercent_.store(clamped);
+    thresholdDB_.store(thresholdDBForPercent(clamped));
+}
+
+std::wstring SoundDetector::readoutLabelWide() const {
+    double pct = sensitivityPercent_.load();
+    double thresh = thresholdDB_.load();
+    auto cp = SoundSensitivityCheckpoint::nearest(pct);
+    wchar_t buf[180];
+    if (enabled_.load()) {
+        std::swprintf(buf, 180, L"%.0f%% \x2022 \"%ls\" (%.0f dB) + Motion", pct, cp.title, thresh);
+    } else {
+        std::swprintf(buf, 180, L"Off (Motion Only \x2022 %.0f%% = \"%ls\")", pct, cp.title);
+    }
+    return std::wstring(buf);
+}
+
+void SoundDetector::reset(double warmupSeconds) {
+    resetUntilTimestamp(monotonicNowSeconds() + warmupSeconds);
+}
+
+void SoundDetector::resetUntilTimestamp(double warmupUntilMonotonicSec) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    prevIn_ = 0.0;
+    prevOut_ = 0.0;
+    windowSqSum_ = 0.0;
+    windowSampleCount_ = 0;
+    recentWindowHits_ = {false, false, false};
+    latestFilteredDB_ = -60.0f;
+    warmupUntilSec_ = warmupUntilMonotonicSec;
+}
+
+void SoundDetector::applyAcousticGrace(double graceSeconds) {
+    applyAcousticGraceUntil(monotonicNowSeconds() + graceSeconds);
+}
+
+void SoundDetector::applyAcousticGraceUntil(double untilMonotonicSec) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (untilMonotonicSec > warmupUntilSec_) {
+        warmupUntilSec_ = untilMonotonicSec;
+    }
+    recentWindowHits_ = {false, false, false};
+}
+
+SoundEvaluation SoundDetector::analyzePCM16Mono(
+    const int16_t* samples,
+    size_t count,
+    int sampleRate,
+    double nowMonotonicSec
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    double thresh = thresholdDB_.load();
+    bool active = enabled_.load();
+
+    if (!samples || count == 0) {
+        return SoundEvaluation{latestFilteredDB_, static_cast<float>(thresh), false};
+    }
+
+    int windowTarget = std::max(240, sampleRate / 20); // 50 ms window (2400 @ 48 kHz)
+    bool didTrigger = false;
+    float chunkPeakDB = -60.0f;
+    bool completedWindow = false;
+
+    for (size_t i = 0; i < count; ++i) {
+        double x = static_cast<double>(samples[i]) / 32768.0;
+        double y = kHpfAlpha * (prevOut_ + x - prevIn_);
+        prevIn_ = x;
+        prevOut_ = y;
+
+        windowSqSum_ += y * y;
+        windowSampleCount_++;
+
+        if (windowSampleCount_ >= windowTarget) {
+            double rms = std::sqrt(windowSqSum_ / static_cast<double>(windowSampleCount_));
+            double winDB = (rms > 0.00001) ? std::clamp(20.0 * std::log10(rms), -60.0, 0.0) : -60.0;
+            latestFilteredDB_ = static_cast<float>(winDB);
+            if (!completedWindow || latestFilteredDB_ > chunkPeakDB) {
+                chunkPeakDB = latestFilteredDB_;
+            }
+            completedWindow = true;
+
+            bool isHit = active && (nowMonotonicSec >= warmupUntilSec_) && (winDB >= thresh);
+            recentWindowHits_[0] = recentWindowHits_[1];
+            recentWindowHits_[1] = recentWindowHits_[2];
+            recentWindowHits_[2] = isHit;
+
+            int hitCount = (recentWindowHits_[0] ? 1 : 0) +
+                           (recentWindowHits_[1] ? 1 : 0) +
+                           (recentWindowHits_[2] ? 1 : 0);
+            if (active && nowMonotonicSec >= warmupUntilSec_ && hitCount >= 2) {
+                didTrigger = true;
+            }
+
+            windowSqSum_ = 0.0;
+            windowSampleCount_ = 0;
+        }
+    }
+
+    float reportedDB = completedWindow ? chunkPeakDB : latestFilteredDB_;
+    return SoundEvaluation{reportedDB, static_cast<float>(thresh), didTrigger};
 }
 
 // MARK: - Color Conversions (BT.709 Video Range NV12 <-> BGRA32)
@@ -763,7 +955,7 @@ void VaultSegmentWriter::appendNV12Frame(
 
     std::lock_guard<std::mutex> qLock(queueMutex_);
     if (stopRequested_ || abandonRequested_) return;
-    if (videoQueue_.size() < 90) {
+    if (videoQueue_.size() < 140) {
         QueuedVideo qv;
         qv.nv12 = std::move(tight);
         qv.pts100ns = pts100ns;
@@ -780,7 +972,7 @@ void VaultSegmentWriter::appendAudioPCM16Mono48k(
     if (!hasAudio_ || !samples || sampleCount == 0) return;
     std::lock_guard<std::mutex> qLock(queueMutex_);
     if (stopRequested_ || abandonRequested_) return;
-    if (audioQueue_.size() < 200) {
+    if (audioQueue_.size() < 300) {
         QueuedAudio qa;
         qa.pcm.assign(samples, samples + sampleCount);
         qa.pts100ns = pts100ns;
@@ -945,6 +1137,10 @@ void VaultSegmentWriter::workerLoop() {
         bool shouldAbandon = false;
         bool shouldStop = false;
 
+        int64_t fedAudioRel100ns = (
+            (totalFedAudioFrames48k + static_cast<int64_t>(pcmAccum.size())) * 10000000LL
+        ) / 48000LL;
+
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCv_.wait(lock, [&]() {
@@ -952,16 +1148,21 @@ void VaultSegmentWriter::workerLoop() {
             });
             if (abandonRequested_) {
                 shouldAbandon = true;
-            } else if (!videoQueue_.empty()) {
-                vItem = std::move(videoQueue_.front());
-                videoQueue_.pop_front();
-                hasV = true;
-            } else if (!audioQueue_.empty()) {
-                aItem = std::move(audioQueue_.front());
-                audioQueue_.pop_front();
-                hasA = true;
-            } else if (stopRequested_) {
-                shouldStop = true;
+            } else {
+                bool preferAudio = !audioQueue_.empty() &&
+                    (videoQueue_.empty() ||
+                     (sessionStarted && fedAudioRel100ns <= latestVideoRel100ns));
+                if (preferAudio) {
+                    aItem = std::move(audioQueue_.front());
+                    audioQueue_.pop_front();
+                    hasA = true;
+                } else if (!videoQueue_.empty()) {
+                    vItem = std::move(videoQueue_.front());
+                    videoQueue_.pop_front();
+                    hasV = true;
+                } else if (stopRequested_) {
+                    shouldStop = true;
+                }
             }
         }
 
@@ -1212,6 +1413,10 @@ void CaptureEngine::stopCapture() {
     if (audioThread_.joinable()) audioThread_.join();
     cameraActive_.store(false);
     micActive_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(writerMutex_);
+        wipePreRollLocked();
+    }
 }
 
 std::wstring CaptureEngine::activeSummaryWide() const {
@@ -1231,8 +1436,87 @@ bool CaptureEngine::copyLatestPreviewFrame(BgraFrame& outFrame) const {
     return true;
 }
 
+void CaptureEngine::wipePreRollLocked() {
+    for (auto& item : preRollVideo_) {
+        crypto::secureZeroVec(item.nv12);
+    }
+    preRollVideo_.clear();
+
+    for (auto& item : preRollAudio_) {
+        secureZeroPcm(item.pcm);
+    }
+    preRollAudio_.clear();
+    preRollAudioSamples_ = 0;
+}
+
+void CaptureEngine::setArmedForPreRoll(bool armed) {
+    armedForPreRoll_.store(armed);
+    if (!armed) {
+        std::lock_guard<std::mutex> lock(writerMutex_);
+        wipePreRollLocked();
+    }
+}
+
+void CaptureEngine::applyLockKeyAcousticGrace(double graceSeconds) {
+    soundDetector_.applyAcousticGrace(graceSeconds);
+}
+
+void CaptureEngine::setSampleAudioEnabled(bool enabled) {
+    sampleAudioEnabled_.store(enabled);
+    if (!enabled) {
+        std::lock_guard<std::mutex> lock(writerMutex_);
+        for (auto& item : preRollAudio_) {
+            secureZeroPcm(item.pcm);
+        }
+        preRollAudio_.clear();
+        preRollAudioSamples_ = 0;
+    }
+}
+
 void CaptureEngine::attachActiveSegmentWriter(std::shared_ptr<VaultSegmentWriter> writer) {
     std::lock_guard<std::mutex> lock(writerMutex_);
+    if (writer && armedForPreRoll_.load() && !preRollVideo_.empty()) {
+        double vSpanSec = 1.0 / 30.0;
+        if (preRollVideo_.size() >= 2) {
+            vSpanSec = std::clamp(
+                static_cast<double>(preRollVideo_.back().pts100ns - preRollVideo_.front().pts100ns) / 10000000.0,
+                0.05, 1.25
+            );
+        }
+        size_t maxTargetAudioSamples = static_cast<size_t>(vSpanSec * 48000.0) + 2400;
+        while (preRollAudioSamples_ > maxTargetAudioSamples && preRollAudio_.size() > 1) {
+            preRollAudioSamples_ -= preRollAudio_.front().pcm.size();
+            secureZeroPcm(preRollAudio_.front().pcm);
+            preRollAudio_.pop_front();
+        }
+
+        for (auto& v : preRollVideo_) {
+            if (v.width > 0 && v.height > 0 && v.nv12.size() >= static_cast<size_t>(v.width * v.height * 3 / 2)) {
+                const uint8_t* yP = v.nv12.data();
+                const uint8_t* uvP = v.nv12.data() + v.width * v.height;
+                writer->appendNV12Frame(yP, v.width, uvP, v.width, v.width, v.height, v.pts100ns, v.captureUnixMs);
+            }
+            crypto::secureZeroVec(v.nv12);
+        }
+        preRollVideo_.clear();
+
+        if (sampleAudioEnabled_.load()) {
+            for (auto& a : preRollAudio_) {
+                if (!a.pcm.empty()) {
+                    writer->appendAudioPCM16Mono48k(a.pcm.data(), a.pcm.size(), a.pts100ns);
+                }
+                secureZeroPcm(a.pcm);
+            }
+        } else {
+            for (auto& a : preRollAudio_) {
+                secureZeroPcm(a.pcm);
+            }
+        }
+        preRollAudio_.clear();
+        preRollAudioSamples_ = 0;
+    } else {
+        wipePreRollLocked();
+    }
     activeWriter_ = std::move(writer);
 }
 
@@ -1246,6 +1530,86 @@ std::shared_ptr<VaultSegmentWriter> CaptureEngine::detachActiveSegmentWriter() {
 std::shared_ptr<VaultSegmentWriter> CaptureEngine::currentSegmentWriter() const {
     std::lock_guard<std::mutex> lock(writerMutex_);
     return activeWriter_;
+}
+
+void CaptureEngine::routeCapturedVideoFrame(
+    const uint8_t* yPlane, int yStride,
+    const uint8_t* uvPlane, int uvStride,
+    int w, int h,
+    int64_t pts100ns
+) {
+    if (!yPlane || !uvPlane || w <= 0 || h <= 0) return;
+
+    std::shared_ptr<VaultSegmentWriter> wr;
+    {
+        std::lock_guard<std::mutex> lock(writerMutex_);
+        wr = activeWriter_;
+        if (!wr && armedForPreRoll_.load()) {
+            size_t yBytes = static_cast<size_t>(w) * static_cast<size_t>(h);
+            size_t uvBytes = yBytes / 2;
+            PreRollVideoItem item;
+            item.width = w;
+            item.height = h;
+            item.pts100ns = pts100ns;
+            item.captureUnixMs = currentUnixMillis();
+            item.nv12.resize(yBytes + uvBytes);
+
+            uint8_t* dstY = item.nv12.data();
+            uint8_t* dstUV = item.nv12.data() + yBytes;
+            for (int r = 0; r < h; ++r) {
+                std::memcpy(dstY + r * w, yPlane + r * yStride, static_cast<size_t>(w));
+            }
+            int uvH = h >> 1;
+            int uvCopy = w & ~1;
+            for (int r = 0; r < uvH; ++r) {
+                std::memcpy(dstUV + r * w, uvPlane + r * uvStride, static_cast<size_t>(uvCopy));
+            }
+
+            preRollVideo_.push_back(std::move(item));
+            // Keep up to ~1.25s (~38 frames @ 30fps) in RAM ring buffer
+            while (preRollVideo_.size() > 38 ||
+                   (preRollVideo_.size() >= 2 &&
+                    (preRollVideo_.back().pts100ns - preRollVideo_.front().pts100ns) > 12500000LL)) {
+                crypto::secureZeroVec(preRollVideo_.front().nv12);
+                preRollVideo_.pop_front();
+            }
+            return;
+        }
+    }
+
+    if (wr) {
+        wr->appendNV12Frame(yPlane, yStride, uvPlane, uvStride, w, h, pts100ns);
+    }
+}
+
+void CaptureEngine::routeCapturedAudioChunk(const int16_t* samples, size_t count, int64_t pts100ns) {
+    if (!sampleAudioEnabled_.load() || !samples || count == 0) return;
+
+    std::shared_ptr<VaultSegmentWriter> wr;
+    {
+        std::lock_guard<std::mutex> lock(writerMutex_);
+        wr = activeWriter_;
+        if (!wr && armedForPreRoll_.load()) {
+            PreRollAudioItem item;
+            item.pcm.assign(samples, samples + count);
+            item.pts100ns = pts100ns;
+            preRollAudioSamples_ += count;
+            preRollAudio_.push_back(std::move(item));
+
+            // Keep up to 1.25s (60,000 samples @ 48 kHz) in RAM ring buffer
+            constexpr size_t kMaxPreRollSamples = 60000;
+            while (preRollAudioSamples_ > kMaxPreRollSamples && preRollAudio_.size() > 1) {
+                preRollAudioSamples_ -= preRollAudio_.front().pcm.size();
+                secureZeroPcm(preRollAudio_.front().pcm);
+                preRollAudio_.pop_front();
+            }
+            return;
+        }
+    }
+
+    if (wr) {
+        wr->appendAudioPCM16Mono48k(samples, count, pts100ns);
+    }
 }
 
 void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticMode) {
@@ -1290,17 +1654,16 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
             }
 
             int64_t pts100ns = static_cast<int64_t>(frameCounter) * 333333LL;
-            if (auto wr = currentSegmentWriter()) {
-                wr->appendNV12Frame(yPlane, w, uvPlane, w, w, h, pts100ns);
-                if (sampleAudioEnabled_.load() && frameCounter % 3 == 0) {
-                    std::vector<int16_t> silentPcm(4800, 0);
-                    wr->appendAudioPCM16Mono48k(silentPcm.data(), silentPcm.size(), pts100ns);
-                }
+            routeCapturedVideoFrame(yPlane, w, uvPlane, w, w, h, pts100ns);
+            if (sampleAudioEnabled_.load() && frameCounter % 3 == 0) {
+                std::vector<int16_t> silentPcm(4800, 0);
+                routeCapturedAudioChunk(silentPcm.data(), silentPcm.size(), pts100ns);
             }
 
             if (frameCounter % 3 == 0) {
                 auto ev = motionDetector_.analyzeNV12Luma(yPlane, w, w, h, monotonicNowSeconds());
                 latestMotionPct_.store(ev.scorePercent);
+                latestMeanLuma_.store(ev.meanLuma);
                 if (sampleAudioEnabled_.load()) latestAudioDb_.store(-38.0f);
                 if (ev.triggered && onMotionTriggered) {
                     onMotionTriggered();
@@ -1359,6 +1722,25 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
         std::lock_guard<std::mutex> lock(summaryMutex_);
         activeSummary_ = L"Camera permission needed or busy in another app";
         return;
+    }
+
+    // Enable continuous auto-exposure & low-light compensation on UVC webcams for dark/night rooms
+    {
+        ComPtr<IAMCameraControl> camCtrl;
+        if (SUCCEEDED(mediaSource.As(&camCtrl)) && camCtrl) {
+            long minExp = 0, maxExp = 0, stepExp = 0, defExp = 0, capsFlags = 0;
+            if (SUCCEEDED(camCtrl->GetRange(CameraControl_Exposure, &minExp, &maxExp, &stepExp, &defExp, &capsFlags))) {
+                if ((capsFlags & CameraControl_Flags_Auto) != 0) {
+                    camCtrl->Set(CameraControl_Exposure, defExp, CameraControl_Flags_Auto);
+                }
+            }
+            long minFocus = 0, maxFocus = 0, stepFocus = 0, defFocus = 0, focusCaps = 0;
+            if (SUCCEEDED(camCtrl->GetRange(CameraControl_Focus, &minFocus, &maxFocus, &stepFocus, &defFocus, &focusCaps))) {
+                if ((focusCaps & CameraControl_Flags_Auto) != 0) {
+                    camCtrl->Set(CameraControl_Focus, defFocus, CameraControl_Flags_Auto);
+                }
+            }
+        }
     }
 
     ComPtr<IMFAttributes> readerAttrs;
@@ -1530,14 +1912,13 @@ void CaptureEngine::videoCaptureLoop(std::wstring videoDeviceId, bool syntheticM
         }
 
         if (yPlane && uvPlane) {
-            if (auto wr = currentSegmentWriter()) {
-                wr->appendNV12Frame(yPlane, yStride, uvPlane, uvStride, w, h, llTimestamp);
-            }
+            routeCapturedVideoFrame(yPlane, yStride, uvPlane, uvStride, w, h, llTimestamp);
 
             frameCounter++;
             if (frameCounter % 3 == 0) {
                 auto ev = motionDetector_.analyzeNV12Luma(yPlane, yStride, w, h, monotonicNowSeconds());
                 latestMotionPct_.store(ev.scorePercent);
+                latestMeanLuma_.store(ev.meanLuma);
                 if (ev.triggered && onMotionTriggered) {
                     onMotionTriggered();
                 }
@@ -1644,28 +2025,28 @@ void CaptureEngine::audioCaptureLoop(std::wstring audioDeviceId) {
             captureClient->ReleaseBuffer(numFrames);
 
             if (sampleAudioEnabled_.load() && !samples.empty()) {
-                // Compute RMS dB
-                size_t nCheck = std::min<size_t>(512, samples.size());
-                double sqSum = 0.0;
-                for (size_t i = 0; i < nCheck; ++i) {
-                    double v = static_cast<double>(samples[i]) / 32768.0;
-                    sqSum += v * v;
+                int64_t pts = static_cast<int64_t>(qpcPos100ns);
+                if (pts <= 0) {
+                    LARGE_INTEGER nowQpc{};
+                    QueryPerformanceCounter(&nowQpc);
+                    pts = (nowQpc.QuadPart * 10000000LL) / qpcFreq.QuadPart;
                 }
-                double rms = std::sqrt(sqSum / static_cast<double>(std::max<size_t>(1, nCheck)));
-                float db = (rms > 0.00001) ? static_cast<float>(20.0 * std::log10(rms)) : -60.0f;
-                latestAudioDb_.store(std::clamp(db, -60.0f, 0.0f));
+                routeCapturedAudioChunk(samples.data(), samples.size(), pts);
 
-                if (auto wr = currentSegmentWriter()) {
-                    int64_t pts = static_cast<int64_t>(qpcPos100ns);
-                    if (pts <= 0) {
-                        LARGE_INTEGER nowQpc{};
-                        QueryPerformanceCounter(&nowQpc);
-                        pts = (nowQpc.QuadPart * 10000000LL) / qpcFreq.QuadPart;
-                    }
-                    wr->appendAudioPCM16Mono48k(samples.data(), samples.size(), pts);
+                auto soundEv = soundDetector_.analyzePCM16Mono(
+                    samples.data(),
+                    samples.size(),
+                    48000,
+                    monotonicNowSeconds()
+                );
+                latestAudioDb_.store(std::clamp(soundEv.filteredDB, -60.0f, 0.0f));
+                if (soundEv.triggered && onSoundTriggered) {
+                    onSoundTriggered();
                 }
+                secureZeroPcm(samples);
             } else {
                 latestAudioDb_.store(-60.0f);
+                secureZeroPcm(samples);
             }
 
             if (FAILED(captureClient->GetNextPacketSize(&packetFrames))) break;

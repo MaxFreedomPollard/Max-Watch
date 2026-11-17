@@ -3,7 +3,7 @@
   <assemblyIdentity
     type="win32"
     name="app.c60.maxwatch"
-    version="1.3.0.0"
+    version="1.4.0.0"
   />
   <description>Max Watch - Offline Motion Security and Encrypted Video Vault</description>
   <dependency>

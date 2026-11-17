@@ -376,9 +376,12 @@ AppWindow::AppWindow(const std::wstring& customVaultDir, bool uiSmokeTestMode, c
       smokeOutDir_(smokeOutDir),
       vault_(customVaultDir),
       lastVaultInteractionSteady_(std::chrono::steady_clock::now()) {
+    // Max Brightness When Locked is ON (checked) by default, and user-uncheckable.
+    sleepAndLock_.setMaxBrightnessWhenLocked(true);
     loadPreferences();
 
     sleepAndLock_.onScreenLocked = [this]() {
+        capture_.applyLockKeyAcousticGrace(0.70);
         if (vault_.isUnlocked()) {
             lockVaultImmediately(true);
         }
@@ -395,6 +398,11 @@ AppWindow::AppWindow(const std::wstring& customVaultDir, bool uiSmokeTestMode, c
     capture_.onMotionTriggered = [this]() {
         if (hwnd_ && !isTerminating_) {
             PostMessageW(hwnd_, WM_APP_MOTION_TRIGGERED, 0, 0);
+        }
+    };
+    capture_.onSoundTriggered = [this]() {
+        if (hwnd_ && !isTerminating_) {
+            PostMessageW(hwnd_, WM_APP_SOUND_TRIGGERED, 0, 0);
         }
     };
 
@@ -424,6 +432,9 @@ AppWindow::~AppWindow() {
 }
 
 void AppWindow::loadPreferences() {
+    bool maxBrightDefault = true;
+    double soundSens = SoundDetector::kDefaultSensitivityPercent;
+
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegPrefsSubkey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD val = 1, sz = sizeof(DWORD);
@@ -437,18 +448,48 @@ void AppWindow::loadPreferences() {
                 capture_.motionDetector().setSensitivityPercent(static_cast<double>(sens));
             }
         }
+        sz = sizeof(DWORD);
+        DWORD wakeSound = 0;
+        if (RegQueryValueExW(hKey, L"WakeOnSoundEnabled", nullptr, nullptr, reinterpret_cast<LPBYTE>(&wakeSound), &sz) == ERROR_SUCCESS) {
+            isWakeOnSoundEnabled_ = (wakeSound != 0);
+        }
+        sz = sizeof(DWORD);
+        DWORD soundPct = 55;
+        if (RegQueryValueExW(hKey, L"SoundSensitivityPercent", nullptr, nullptr, reinterpret_cast<LPBYTE>(&soundPct), &sz) == ERROR_SUCCESS) {
+            if (soundPct >= 10 && soundPct <= 100) {
+                soundSens = static_cast<double>(soundPct);
+            }
+        }
+        sz = sizeof(DWORD);
+        DWORD maxBr = 1;
+        if (RegQueryValueExW(hKey, L"MaxBrightnessWhenLocked", nullptr, nullptr, reinterpret_cast<LPBYTE>(&maxBr), &sz) == ERROR_SUCCESS) {
+            maxBrightDefault = (maxBr != 0);
+        }
         RegCloseKey(hKey);
     }
+
+    if (!isAudioRecordingEnabled_) {
+        isWakeOnSoundEnabled_ = false;
+    }
     capture_.setSampleAudioEnabled(isAudioRecordingEnabled_);
+    capture_.soundDetector().setSensitivityPercent(soundSens);
+    capture_.soundDetector().setEnabled(isArmed_ && isWakeOnSoundEnabled_ && isAudioRecordingEnabled_);
+    sleepAndLock_.setMaxBrightnessWhenLocked(maxBrightDefault);
 }
 
 void AppWindow::savePreferences() const {
     HKEY hKey = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegPrefsSubkey, 0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
         DWORD audioVal = isAudioRecordingEnabled_ ? 1 : 0;
-        DWORD sensVal = static_cast<DWORD>( std::lround(capture_.motionDetector().sensitivityPercent()) );
+        DWORD sensVal = static_cast<DWORD>(std::lround(capture_.motionDetector().sensitivityPercent()));
+        DWORD wakeSoundVal = isWakeOnSoundEnabled_ ? 1 : 0;
+        DWORD soundSensVal = static_cast<DWORD>(std::lround(capture_.soundDetector().sensitivityPercent()));
+        DWORD maxBrightVal = sleepAndLock_.isMaxBrightnessWhenLocked() ? 1 : 0;
         RegSetValueExW(hKey, L"RecordAudioEnabled", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&audioVal), sizeof(DWORD));
         RegSetValueExW(hKey, L"SensitivityPercent", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&sensVal), sizeof(DWORD));
+        RegSetValueExW(hKey, L"WakeOnSoundEnabled", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&wakeSoundVal), sizeof(DWORD));
+        RegSetValueExW(hKey, L"SoundSensitivityPercent", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&soundSensVal), sizeof(DWORD));
+        RegSetValueExW(hKey, L"MaxBrightnessWhenLocked", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&maxBrightVal), sizeof(DWORD));
         RegCloseKey(hKey);
     }
 }
@@ -476,7 +517,7 @@ bool AppWindow::createAndShow(HINSTANCE hInstance, int nCmdShow) {
 
     UINT dpi = GetDpiForSystem();
     int initW = MulDiv(1300, static_cast<int>(dpi), 96);
-    int initH = MulDiv(820, static_cast<int>(dpi), 96);
+    int initH = MulDiv(840, static_cast<int>(dpi), 96);
 
     RECT wr{0, 0, initW, initH};
     AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW, TRUE, 0);
@@ -491,7 +532,7 @@ bool AppWindow::createAndShow(HINSTANCE hInstance, int nCmdShow) {
     hwnd_ = CreateWindowExW(
         0,
         kMainWndClass,
-        L"Max Watch - Offline Motion Security & Encrypted Video Vault",
+        L"Max Watch - Offline Motion & Sound Security + Encrypted Video Vault",
         WS_OVERLAPPEDWINDOW,
         posX, posY, winW, winH,
         nullptr,
@@ -552,6 +593,10 @@ void AppWindow::buildMenuBar() {
     AppendMenuW(recMenu, MF_STRING, IDM_REC_TOGGLE_ARM, L"&Start / Stop Motion Detection\tCtrl+R");
     AppendMenuW(recMenu, MF_STRING | (isAudioRecordingEnabled_ ? MF_CHECKED : MF_UNCHECKED),
                 IDM_REC_TOGGLE_AUDIO, L"Record Microphone &Audio\tCtrl+Shift+A");
+    AppendMenuW(recMenu, MF_STRING | (isWakeOnSoundEnabled_ ? MF_CHECKED : MF_UNCHECKED),
+                IDM_REC_TOGGLE_WAKE_SOUND, L"Also &Wake on Sound (Additive to Motion)");
+    AppendMenuW(recMenu, MF_STRING | (sleepAndLock_.isMaxBrightnessWhenLocked() ? MF_CHECKED : MF_UNCHECKED),
+                IDM_REC_TOGGLE_MAX_BRIGHTNESS, L"&Max Screen Brightness When Locked (Night Visibility)");
     AppendMenuW(recMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(recMenu, MF_STRING, IDM_REC_CHOOSE_SAVE_FOLDER, L"Choose '&Save & Next' Folder...\tCtrl+Shift+S");
     AppendMenuW(recMenu, MF_STRING, IDM_REC_EXPORT_MP4, L"&Save Current Clip As MP4...\tCtrl+E");
@@ -689,9 +734,11 @@ void AppWindow::updateTrayIcon() {
     nid.uFlags = NIF_ICON | NIF_TIP;
     nid.hIcon = nextIcon;
     if (isRecordingClip_) {
-        wcscpy_s(nid.szTip, L"Max Watch - RECORDING MOTION (Vault Locked)");
+        wcscpy_s(nid.szTip, L"Max Watch - RECORDING TO LOCKED VAULT");
     } else if (isArmed_) {
-        wcscpy_s(nid.szTip, L"Max Watch - ARMED & MONITORING");
+        wcscpy_s(nid.szTip, isWakeOnSoundEnabled_
+            ? L"Max Watch - ARMED (Motion + Sound)"
+            : L"Max Watch - ARMED (Motion)");
     } else {
         wcscpy_s(nid.szTip, L"Max Watch - 100% Offline Security");
     }
@@ -720,6 +767,11 @@ void AppWindow::showTrayContextMenu() {
                 isArmed_ ? L"Stop Motion Detection" : L"Start Motion Detection");
     AppendMenuW(m, MF_STRING | (isAudioRecordingEnabled_ ? MF_CHECKED : MF_UNCHECKED),
                 IDM_REC_TOGGLE_AUDIO, L"Record Microphone Audio");
+    AppendMenuW(m, MF_STRING | (isWakeOnSoundEnabled_ ? MF_CHECKED : MF_UNCHECKED),
+                IDM_REC_TOGGLE_WAKE_SOUND, L"Also Wake on Sound (Additive)");
+    AppendMenuW(m, MF_STRING | (sleepAndLock_.isMaxBrightnessWhenLocked() ? MF_CHECKED : MF_UNCHECKED),
+                IDM_REC_TOGGLE_MAX_BRIGHTNESS, L"Max Brightness When Locked (Night)");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_PLAY_ALL, L"Play All Clips...");
     AppendMenuW(m, MF_STRING, IDM_APP_LOCK_VAULT, L"Lock Vault Now");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -1078,6 +1130,66 @@ void AppWindow::drawMeterBar(
     rt->DrawRoundedRectangle(bgRr, borderBr.Get(), 1.0f);
 }
 
+void AppWindow::drawCheckboxRow(
+    ID2D1RenderTarget* rt,
+    int hitId,
+    D2D1_RECT_F rect,
+    bool checked,
+    const std::wstring& label,
+    D2D1_COLOR_F accentColor,
+    bool enabled
+) {
+    if (hitId != 0) {
+        hitZones_.push_back({hitId, rect, enabled});
+    }
+
+    bool hovered = enabled && (hoveredHitId_ == hitId) && (hitId != 0);
+    float cy = (rect.top + rect.bottom) * 0.5f;
+    float boxSz = 16.0f;
+    D2D1_RECT_F boxR = D2D1::RectF(rect.left, cy - boxSz * 0.5f, rect.left + boxSz, cy + boxSz * 0.5f);
+
+    ComPtr<ID2D1SolidColorBrush> bgBr, bdBr, checkBr;
+    D2D1_COLOR_F bgCol = checked
+        ? accentColor
+        : rgba(0.13f, 0.16f, 0.23f, hovered ? 1.0f : 0.92f);
+    D2D1_COLOR_F bdCol = checked
+        ? rgba(1.0f, 1.0f, 1.0f, 0.45f)
+        : rgba(1.0f, 1.0f, 1.0f, hovered ? 0.48f : 0.26f);
+    if (!enabled) {
+        bgCol.a *= 0.45f;
+        bdCol.a *= 0.35f;
+    }
+
+    rt->CreateSolidColorBrush(bgCol, &bgBr);
+    rt->CreateSolidColorBrush(bdCol, &bdBr);
+    D2D1_ROUNDED_RECT boxRr = D2D1::RoundedRect(boxR, 4.0f, 4.0f);
+    rt->FillRoundedRectangle(boxRr, bgBr.Get());
+    rt->DrawRoundedRectangle(boxRr, bdBr.Get(), 1.2f);
+
+    if (checked) {
+        rt->CreateSolidColorBrush(rgba(0.05f, 0.07f, 0.11f, 1.0f), &checkBr);
+        rt->DrawLine(
+            D2D1::Point2F(boxR.left + 3.6f, cy + 0.4f),
+            D2D1::Point2F(boxR.left + 6.9f, cy + 3.8f),
+            checkBr.Get(), 2.2f
+        );
+        rt->DrawLine(
+            D2D1::Point2F(boxR.left + 6.7f, cy + 3.8f),
+            D2D1::Point2F(boxR.right - 3.2f, cy - 3.8f),
+            checkBr.Get(), 2.2f
+        );
+    }
+
+    D2D1_COLOR_F txtCol = enabled
+        ? (checked ? rgba(1.0f, 1.0f, 1.0f, 1.0f) : rgba(0.84f, 0.87f, 0.93f, 1.0f))
+        : rgba(0.60f, 0.64f, 0.70f, 0.60f);
+    drawTextLine(
+        rt, label, fmtBodySemiBold_.Get(),
+        D2D1::RectF(boxR.right + 7.0f, rect.top, rect.right, rect.bottom),
+        txtCol
+    );
+}
+
 void AppWindow::drawSensitivitySlider(ID2D1RenderTarget* rt, D2D1_RECT_F rect) {
     sensitivityRectDip_ = rect;
     hitZones_.push_back({static_cast<int>(HitId::RecSensitivitySlider), rect, true});
@@ -1104,6 +1216,138 @@ void AppWindow::drawSensitivitySlider(ID2D1RenderTarget* rt, D2D1_RECT_F rect) {
     D2D1_ELLIPSE knob = D2D1::Ellipse(D2D1::Point2F(knobX, trackY), rad, rad);
     rt->FillEllipse(knob, knobBr.Get());
     rt->DrawEllipse(knob, knobRing.Get(), 2.0f);
+}
+
+void AppWindow::drawSoundSensitivitySlider(ID2D1RenderTarget* rt, D2D1_RECT_F rect) {
+    soundSensitivityRectDip_ = rect;
+    hitZones_.push_back({static_cast<int>(HitId::RecSoundSensitivitySlider), rect, true});
+
+    float trackY = (rect.top + rect.bottom) * 0.5f;
+    float leftX = rect.left + 8.0f;
+    float rightX = rect.right - 8.0f;
+    float span = std::max(1.0f, rightX - leftX);
+
+    double sens = capture_.soundDetector().sensitivityPercent();
+    float norm = static_cast<float>(std::clamp((sens - 10.0) / 90.0, 0.0, 1.0));
+    float knobX = leftX + norm * span;
+    bool wakeActive = isWakeOnSoundEnabled_ && isAudioRecordingEnabled_;
+
+    ComPtr<ID2D1SolidColorBrush> trBg, trFill, cpPassedBr, cpIdleBr, knobBr, knobRing, glowBr;
+    rt->CreateSolidColorBrush(rgba(0.14f, 0.18f, 0.25f, 1.0f), &trBg);
+    rt->CreateSolidColorBrush(
+        wakeActive ? rgba(1.0f, 0.72f, 0.18f, 1.0f) : rgba(0.55f, 0.48f, 0.30f, 0.65f),
+        &trFill
+    );
+    rt->CreateSolidColorBrush(
+        wakeActive ? rgba(1.0f, 0.90f, 0.52f, 1.0f) : rgba(0.75f, 0.70f, 0.55f, 0.75f),
+        &cpPassedBr
+    );
+    rt->CreateSolidColorBrush(rgba(0.42f, 0.48f, 0.58f, 0.95f), &cpIdleBr);
+    rt->CreateSolidColorBrush(rgba(1.0f, 1.0f, 1.0f, wakeActive ? 1.0f : 0.82f), &knobBr);
+    rt->CreateSolidColorBrush(
+        wakeActive ? rgba(1.0f, 0.74f, 0.16f, 0.95f) : rgba(0.68f, 0.62f, 0.46f, 0.80f),
+        &knobRing
+    );
+
+    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(leftX, trackY - 3.5f, rightX, trackY + 3.5f), 3.5f, 3.5f), trBg.Get());
+    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(leftX, trackY - 3.5f, knobX, trackY + 3.5f), 3.5f, 3.5f), trFill.Get());
+
+    // 5 interactive sound-level checkpoint dots along the rail (15%, 35%, 55% "Normal Talking Voice", 78%, 95%)
+    auto nearestCp = SoundSensitivityCheckpoint::nearest(sens);
+    for (const auto& cp : SoundSensitivityCheckpoint::all()) {
+        float cpNorm = static_cast<float>(std::clamp((cp.percent - 10.0) / 90.0, 0.0, 1.0));
+        float cx = leftX + cpNorm * span;
+        bool isCurrent = (std::abs(cp.percent - nearestCp.percent) < 0.1);
+        float dotR = isCurrent ? 3.8f : 2.8f;
+        D2D1_ELLIPSE dot = D2D1::Ellipse(D2D1::Point2F(cx, trackY), dotR, dotR);
+        rt->FillEllipse(dot, (cp.percent <= sens + 0.5) ? cpPassedBr.Get() : cpIdleBr.Get());
+    }
+
+    bool interacting = draggingSoundSensitivity_ || (hoveredHitId_ == static_cast<int>(HitId::RecSoundSensitivitySlider));
+    if (interacting) {
+        rt->CreateSolidColorBrush(rgba(1.0f, 0.76f, 0.18f, 0.28f), &glowBr);
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, trackY), 12.5f, 12.5f), glowBr.Get());
+    }
+
+    float rad = interacting ? 8.8f : 7.4f;
+    D2D1_ELLIPSE knob = D2D1::Ellipse(D2D1::Point2F(knobX, trackY), rad, rad);
+    rt->FillEllipse(knob, knobBr.Get());
+    rt->DrawEllipse(knob, knobRing.Get(), 2.1f);
+}
+
+void AppWindow::drawSoundCheckpointPopup(
+    ID2D1RenderTarget* rt,
+    D2D1_RECT_F sliderRect,
+    float stageLeft,
+    float stageRight
+) {
+    float leftX = sliderRect.left + 8.0f;
+    float rightX = sliderRect.right - 8.0f;
+    float span = std::max(1.0f, rightX - leftX);
+
+    double sens = capture_.soundDetector().sensitivityPercent();
+    double threshDb = capture_.soundDetector().thresholdDB();
+    auto cp = SoundSensitivityCheckpoint::nearest(sens);
+
+    float norm = static_cast<float>(std::clamp((sens - 10.0) / 90.0, 0.0, 1.0));
+    float knobX = leftX + norm * span;
+
+    const float cardW = 352.0f;
+    const float cardH = 74.0f;
+    const float arrowH = 8.0f;
+    float cardLeft = std::clamp(knobX - cardW * 0.5f, stageLeft + 8.0f, std::max(stageLeft + 8.0f, stageRight - 8.0f - cardW));
+    float cardBottom = sliderRect.top - arrowH - 3.0f;
+    float cardTop = cardBottom - cardH;
+    D2D1_RECT_F cardR = D2D1::RectF(cardLeft, cardTop, cardLeft + cardW, cardBottom);
+
+    ComPtr<ID2D1SolidColorBrush> shadowBr, bgBr, bdBr;
+    rt->CreateSolidColorBrush(rgba(0.0f, 0.0f, 0.0f, 0.52f), &shadowBr);
+    rt->CreateSolidColorBrush(rgba(0.06f, 0.08f, 0.13f, 0.98f), &bgBr);
+    rt->CreateSolidColorBrush(rgba(1.0f, 0.76f, 0.22f, 0.95f), &bdBr);
+
+    D2D1_RECT_F shadowR = D2D1::RectF(cardR.left + 2.0f, cardR.top + 3.0f, cardR.right + 2.0f, cardR.bottom + 3.0f);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(shadowR, 9.0f, 9.0f), shadowBr.Get());
+    rt->FillRoundedRectangle(D2D1::RoundedRect(cardR, 9.0f, 9.0f), bgBr.Get());
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(cardR, 9.0f, 9.0f), bdBr.Get(), 1.5f);
+
+    // Downward pointer arrow anchored directly to thumb X
+    float arrowTipX = std::clamp(knobX, cardR.left + 16.0f, cardR.right - 16.0f);
+    ComPtr<ID2D1PathGeometry> triGeom;
+    if (SUCCEEDED(d2dFactory_->CreatePathGeometry(&triGeom))) {
+        ComPtr<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(triGeom->Open(&sink))) {
+            sink->BeginFigure(D2D1::Point2F(arrowTipX - 7.5f, cardBottom - 0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(arrowTipX + 7.5f, cardBottom - 0.5f));
+            sink->AddLine(D2D1::Point2F(arrowTipX, cardBottom + arrowH));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            rt->FillGeometry(triGeom.Get(), bgBr.Get());
+            rt->DrawLine(D2D1::Point2F(arrowTipX - 7.5f, cardBottom), D2D1::Point2F(arrowTipX, cardBottom + arrowH), bdBr.Get(), 1.5f);
+            rt->DrawLine(D2D1::Point2F(arrowTipX + 7.5f, cardBottom), D2D1::Point2F(arrowTipX, cardBottom + arrowH), bdBr.Get(), 1.5f);
+        }
+    }
+
+    wchar_t hdrBuf[128]{};
+    std::swprintf(hdrBuf, 128, L"🔊 SOUND WAKE LEVEL • %.0f%% (%.0f dB) + MOTION", sens, threshDb);
+    drawTextLine(
+        rt, hdrBuf, fmtMonoBold_.Get(),
+        D2D1::RectF(cardR.left + 12.0f, cardR.top + 6.0f, cardR.right - 12.0f, cardR.top + 24.0f),
+        rgba(1.0f, 0.80f, 0.24f, 1.0f)
+    );
+
+    std::wstring quoteTitle = std::wstring(L"\"") + cp.title + L"\"";
+    drawTextLine(
+        rt, quoteTitle, fmtSectionTitle_.Get(),
+        D2D1::RectF(cardR.left + 12.0f, cardR.top + 24.0f, cardR.right - 12.0f, cardR.top + 47.0f),
+        rgba(1.0f, 1.0f, 1.0f, 1.0f)
+    );
+
+    std::wstring exLine = std::wstring(L"Picks up: ") + cp.examples;
+    drawTextLine(
+        rt, exLine, fmtSubSmall_.Get(),
+        D2D1::RectF(cardR.left + 12.0f, cardR.top + 47.0f, cardR.right - 12.0f, cardR.bottom - 5.0f),
+        rgba(0.80f, 0.84f, 0.92f, 1.0f)
+    );
 }
 
 void AppWindow::drawScrubberTimeline(ID2D1RenderTarget* rt, D2D1_RECT_F rect) {
@@ -1202,6 +1446,9 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
 
     rt->Clear(rgba(0.05f, 0.06f, 0.09f, 1.0f));
 
+    const bool wakeSoundActive = isWakeOnSoundEnabled_ && isAudioRecordingEnabled_;
+    const std::wstring wakeModeShort = wakeSoundActive ? L"MOTION+SOUND" : L"MOTION";
+
     // =========================================================================
     // 1. Top Studio Header Bar (height = 62)
     // =========================================================================
@@ -1255,13 +1502,20 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
 
         std::wstring pillTxt;
         D2D1_COLOR_F pillColor;
-        if (isRecordingClip_) {
+        if (lowDiskSpaceWarning_) {
+            pillTxt = L"⚠ LOW DISK SPACE (<200 MB)";
+            pillColor = rgba(1.0f, 0.84f, 0.22f, 1.0f);
+        } else if (isRecordingClip_) {
             pillTxt = L"● RECORDING • LOCKED VAULT";
             pillColor = rgba(1.0f, 0.34f, 0.34f, 1.0f);
         } else if (isArmed_) {
-            pillTxt = sleepAndLock_.isScreenCurrentlyLocked()
-                ? L"● ARMED • SCREEN LOCKED"
-                : L"● ARMED • MONITORING";
+            if (sleepAndLock_.isScreenCurrentlyLocked()) {
+                pillTxt = sleepAndLock_.isBrightnessBoostActive()
+                    ? L"● ARMED • ☀ 100% LOCK LIGHT"
+                    : L"● ARMED • SCREEN LOCKED";
+            } else {
+                pillTxt = L"● ARMED (" + wakeModeShort + L")";
+            }
             pillColor = rgba(0.24f, 0.90f, 0.48f, 1.0f);
         } else {
             pillTxt = L"100% OFFLINE • READY";
@@ -1297,7 +1551,7 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                    L"Vault Password Settings...", ButtonStyle::Neutral);
 
         if (!vault_.isUnlocked()) {
-            D2D1_RECT_F cardR = D2D1::RectF(sidebarX + 14.0f, topBarH + 66.0f, widthDip - 14.0f, topBarH + 282.0f);
+            D2D1_RECT_F cardR = D2D1::RectF(sidebarX + 14.0f, topBarH + 66.0f, widthDip - 14.0f, topBarH + 288.0f);
             ComPtr<ID2D1SolidColorBrush> cBg, cBd;
             rt->CreateSolidColorBrush(rgba(0.10f, 0.12f, 0.18f, 1.0f), &cBg);
             rt->CreateSolidColorBrush(rgba(1.0f, 1.0f, 1.0f, 0.10f), &cBd);
@@ -1319,9 +1573,9 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                        D2D1::RectF(cardR.left + 32.0f, cardR.top + 96.0f, cardR.right - 32.0f, cardR.top + 128.0f),
                        L"Unlock Vault / Play All", ButtonStyle::Cyan);
 
-            drawTextLine(rt, L"New motion clips encrypt automatically even while locked or when your PC screen is locked (Win+L).",
+            drawTextLine(rt, L"Motion & sound clips encrypt automatically with 1.25s pre-roll even when your PC screen is locked (Win+L).",
                          fmtSubSmall_.Get(),
-                         D2D1::RectF(cardR.left + 14.0f, cardR.top + 138.0f, cardR.right - 14.0f, cardR.bottom - 10.0f),
+                         D2D1::RectF(cardR.left + 14.0f, cardR.top + 136.0f, cardR.right - 14.0f, cardR.bottom - 10.0f),
                          rgba(0.62f, 0.65f, 0.72f, 1.0f), DWRITE_TEXT_ALIGNMENT_CENTER, true);
         } else {
             sidebarListRectDip_ = D2D1::RectF(sidebarX + 12.0f, topBarH + 64.0f, widthDip - 12.0f, pwBtnRect.top - 12.0f);
@@ -1406,9 +1660,9 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
 
     if (!isInPlayerMode_) {
         // ---------------------------------------------------------------------
-        // A. LIVE CAMERA & MOTION STUDIO STAGE
+        // A. LIVE CAMERA, MOTION + SOUND WAKE & NIGHT ILLUMINATION STUDIO STAGE
         // ---------------------------------------------------------------------
-        const float deckH = 148.0f;
+        const float deckH = 204.0f;
         D2D1_RECT_F deckR = D2D1::RectF(stageLeft + 14.0f, stageBottom - 14.0f - deckH, stageRight - 14.0f, stageBottom - 14.0f);
         D2D1_RECT_F previewR = D2D1::RectF(stageLeft + 14.0f, stageTop + 14.0f, stageRight - 14.0f, deckR.top - 12.0f);
 
@@ -1427,17 +1681,28 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
         rt->DrawRoundedRectangle(D2D1::RoundedRect(previewR, 12.0f, 12.0f), pvBd.Get(), 1.0f);
 
         // Top-Left HUD Banner
+        std::wstring triggerBadge = L"Motion";
+        if (hasMotionTriggerInActiveClip_ && hasSoundTriggerInActiveClip_) {
+            triggerBadge = L"Motion+Sound";
+        } else if (hasSoundTriggerInActiveClip_) {
+            triggerBadge = L"Sound Wake";
+        }
+
         std::wstring hudText;
         if (capture_.isCameraPermissionDenied()) {
             hudText = L"Camera permission needed: click 'Open Windows Camera & Mic Settings' to allow access.";
+        } else if (lowDiskSpaceWarning_) {
+            hudText = L"⚠ LOW DISK SPACE (<200 MB free): Free disk space or delete old vault clips to continue recording.";
         } else if (isRecordingClip_) {
-            hudText = L"● MOTION RECORDING ACTIVE • " + capture_.activeSummaryWide();
+            hudText = L"● RECORDING (" + triggerBadge + L") • " + capture_.activeSummaryWide();
         } else if (isArmed_) {
-            hudText = L"● ARMED & MONITORING • " + capture_.activeSummaryWide();
+            std::wstring nightTag = sleepAndLock_.isMaxBrightnessWhenLocked() ? L" • ☀ Night Lock Light Ready" : L"";
+            hudText = L"● ARMED (" + (wakeSoundActive ? std::wstring(L"Motion + Sound") : std::wstring(L"Motion")) +
+                      L") • " + capture_.activeSummaryWide() + nightTag;
         } else {
             hudText = L"LIVE MONITOR • " + capture_.activeSummaryWide();
         }
-        float hudW = std::min((previewR.right - previewR.left) - 250.0f, measureTextWidth(hudText, fmtBodySemiBold_.Get(), 900.0f) + 26.0f);
+        float hudW = std::min((previewR.right - previewR.left) - 270.0f, measureTextWidth(hudText, fmtBodySemiBold_.Get(), 950.0f) + 26.0f);
         hudW = std::max(220.0f, hudW);
         D2D1_RECT_F hudBoxR = D2D1::RectF(previewR.left + 12.0f, previewR.top + 12.0f, previewR.left + 12.0f + hudW, previewR.top + 44.0f);
         {
@@ -1451,11 +1716,11 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                          rgba(1, 1, 1, 1));
         }
 
-        // Top-Right Red REC Badge (when recording motion)
+        // Top-Right Red REC Badge (when recording motion and/or sound)
         if (isRecordingClip_) {
             double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - recordingStartedSteady_).count();
-            std::wstring recStr = L"● REC " + formatClockMMSS(elapsed, false) + L" • 1s Power-Cut-Safe Vault Sync";
-            float rw = measureTextWidth(recStr, fmtMonoBold_.Get(), 500.0f) + 24.0f;
+            std::wstring recStr = L"● REC " + formatClockMMSS(elapsed, false) + L" (" + triggerBadge + L") • 1s Vault Sync";
+            float rw = measureTextWidth(recStr, fmtMonoBold_.Get(), 540.0f) + 24.0f;
             D2D1_RECT_F recR = D2D1::RectF(previewR.right - 12.0f - rw, previewR.top + 12.0f, previewR.right - 12.0f, previewR.top + 44.0f);
             ComPtr<ID2D1SolidColorBrush> rBg;
             rt->CreateSolidColorBrush(rgba(0.72f, 0.08f, 0.12f, 0.92f), &rBg);
@@ -1484,18 +1749,20 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                        L"Open Windows Camera & Mic Settings", ButtonStyle::Yellow);
         }
 
-        // Bottom Studio Deck
+        // Bottom Studio Deck (5 rows + footer)
         rt->CreateSolidColorBrush(rgba(0.08f, 0.10f, 0.15f, 1.0f), &deckBg);
         rt->CreateSolidColorBrush(rgba(1.0f, 1.0f, 1.0f, 0.09f), &deckBd);
         rt->FillRoundedRectangle(D2D1::RoundedRect(deckR, 12.0f, 12.0f), deckBg.Get());
         rt->DrawRoundedRectangle(D2D1::RoundedRect(deckR, 12.0f, 12.0f), deckBd.Get(), 1.0f);
 
-        const float row1Y = deckR.top + 14.0f;
-        const float row2Y = row1Y + 34.0f;
-        const float row3Y = row2Y + 34.0f;
+        const float row1Y = deckR.top + 11.0f;
+        const float row2Y = row1Y + 31.0f;
+        const float row3Y = row2Y + 31.0f;
+        const float row4Y = row3Y + 31.0f;
+        const float row5Y = row4Y + 31.0f;
         const float labelL = deckR.left + 16.0f;
-        const float meterL = labelL + 148.0f;
-        const float meterW = 260.0f;
+        const float meterL = labelL + 162.0f;
+        const float meterW = 248.0f;
         const float readoutL = meterL + meterW + 12.0f;
         const float rightCtlW = 216.0f;
         const float rightCtlL = deckR.right - 16.0f - rightCtlW;
@@ -1520,7 +1787,7 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                    D2D1::RectF(rightCtlL, row1Y - 1.0f, rightCtlL + rightCtlW, row1Y + 25.0f),
                    camBtnLabel, ButtonStyle::Neutral);
 
-        // Row 2: Sensitivity Scale + Slider + Readout + Mic Popup
+        // Row 2: Motion Sensitivity Scale + Slider + Readout + Mic Popup
         drawTextLine(rt, L"Motion Detect Scale:", fmtBodySemiBold_.Get(), D2D1::RectF(labelL, row2Y, meterL, row2Y + 24.0f), rgba(1, 1, 1, 1));
         drawSensitivitySlider(rt, D2D1::RectF(meterL, row2Y, meterL + meterW, row2Y + 24.0f));
         drawTextLine(rt, capture_.motionDetector().sensitivityLabelWide(), fmtMonoSemiBold_.Get(),
@@ -1536,12 +1803,18 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                    D2D1::RectF(rightCtlL, row2Y - 1.0f, rightCtlL + rightCtlW, row2Y + 25.0f),
                    micBtnLabel, ButtonStyle::Neutral, isAudioRecordingEnabled_ && !audioDevices_.empty());
 
-        // Row 3: Mic Audio + Meter + Readout + Audio ON/OFF Segmented Switch
+        // Row 3: Mic Audio + Meter (with yellow sound-wake threshold marker when active) + Readout + Audio ON/OFF
         drawTextLine(rt, L"Mic Audio:", fmtBodySemiBold_.Get(), D2D1::RectF(labelL, row3Y, meterL, row3Y + 24.0f), rgba(1, 1, 1, 1));
         float db = capture_.latestAudioDb();
-        double audioFrac = isAudioRecordingEnabled_ ? std::clamp((static_cast<double>(db) + 60.0) / 60.0, 0.0, 1.0) : 0.0;
+        double audioFrac = isAudioRecordingEnabled_ ? SoundDetector::meterFractionForDB(static_cast<double>(db)) : 0.0;
+        double soundThreshFrac = wakeSoundActive
+            ? SoundDetector::meterFractionForDB(capture_.soundDetector().thresholdDB())
+            : -1.0;
+        D2D1_COLOR_F audBarCol = (wakeSoundActive && static_cast<double>(db) >= capture_.soundDetector().thresholdDB())
+            ? rgba(1.0f, 0.72f, 0.18f, 1.0f)
+            : rgba(0.22f, 0.80f, 0.84f, 1.0f);
         drawMeterBar(rt, D2D1::RectF(meterL, row3Y + 5.0f, meterL + meterW, row3Y + 19.0f),
-                     audioFrac, -1.0, rgba(0.22f, 0.80f, 0.84f, 1.0f));
+                     audioFrac, soundThreshFrac, audBarCol);
 
         std::wstring audTxt;
         if (!isAudioRecordingEnabled_) {
@@ -1564,14 +1837,73 @@ void AppWindow::renderSceneToTarget(ID2D1RenderTarget* rt, float widthDip, float
                    D2D1::RectF(rightCtlL + halfSeg + 4.0f, row3Y - 1.0f, rightCtlL + rightCtlW, row3Y + 25.0f),
                    L"🔇 Audio OFF", !isAudioRecordingEnabled_ ? ButtonStyle::Red : ButtonStyle::Neutral);
 
+        // Row 4: Additive "Also Wake on Sound?" Checkbox + Interactive Checkpoint Drag Slider + Readout
+        drawCheckboxRow(
+            rt,
+            static_cast<int>(HitId::RecWakeOnSoundToggle),
+            D2D1::RectF(labelL, row4Y, meterL - 4.0f, row4Y + 24.0f),
+            wakeSoundActive,
+            L"Also Wake on Sound?",
+            rgba(1.0f, 0.76f, 0.20f, 1.0f),
+            true
+        );
+        drawSoundSensitivitySlider(rt, D2D1::RectF(meterL, row4Y, meterL + meterW, row4Y + 24.0f));
+
+        double sPct = capture_.soundDetector().sensitivityPercent();
+        auto curCp = SoundSensitivityCheckpoint::nearest(sPct);
+        wchar_t soundReadout[192]{};
+        if (wakeSoundActive) {
+            std::swprintf(
+                soundReadout, 192,
+                L"%.0f%% • \"%ls\" (%.0f dB) + Motion (Drag slider for examples)",
+                sPct, curCp.title, capture_.soundDetector().thresholdDB()
+            );
+        } else {
+            std::swprintf(
+                soundReadout, 192,
+                L"Off (Motion Always Active • %.0f%% = \"%ls\" — drag slider to enable)",
+                sPct, curCp.title
+            );
+        }
+        drawTextLine(
+            rt, soundReadout, fmtMonoSemiBold_.Get(),
+            D2D1::RectF(readoutL, row4Y, deckR.right - 16.0f, row4Y + 24.0f),
+            wakeSoundActive ? rgba(1.0f, 0.80f, 0.26f, 1.0f) : rgba(0.66f, 0.70f, 0.78f, 1.0f)
+        );
+
+        // Row 5: Default-ON "☀ Max Brightness When Locked" Checkbox + Night Visibility Explanation
+        bool maxBrChecked = sleepAndLock_.isMaxBrightnessWhenLocked();
+        drawCheckboxRow(
+            rt,
+            static_cast<int>(HitId::RecMaxBrightnessToggle),
+            D2D1::RectF(labelL, row5Y, labelL + 224.0f, row5Y + 24.0f),
+            maxBrChecked,
+            L"☀ Max Brightness When Locked",
+            rgba(1.0f, 0.82f, 0.22f, 1.0f),
+            true
+        );
+        std::wstring brightDesc = maxBrChecked
+            ? L"Default ON — keeps lock screen / screensaver at 100% brightness while armed so pitch-dark rooms stay visible"
+            : L"Off — screen brightness & display sleep follow normal Windows settings while locked";
+        drawTextLine(
+            rt, brightDesc, fmtSubSmall_.Get(),
+            D2D1::RectF(labelL + 234.0f, row5Y, deckR.right - 16.0f, row5Y + 24.0f),
+            maxBrChecked ? rgba(0.95f, 0.88f, 0.64f, 1.0f) : rgba(0.64f, 0.68f, 0.74f, 1.0f)
+        );
+
         // Footer Note
         drawTextLine(
             rt,
-            L"Locked-Screen Ready: Press Win+L to lock your PC while Max Watch keeps recording. Saves every 1s against power loss & flushes cleanly on exit.",
+            L"Motion Always Active • 1.25s RAM Pre-Roll • Win+L Lock-Screen 100% Night Illumination • 1s Power-Cut-Safe AES-256 Vault Sync",
             fmtSubSmall_.Get(),
-            D2D1::RectF(labelL, deckR.bottom - 29.0f, deckR.right - 16.0f, deckR.bottom - 7.0f),
+            D2D1::RectF(labelL, deckR.bottom - 27.0f, deckR.right - 16.0f, deckR.bottom - 6.0f),
             rgba(0.96f, 0.82f, 0.38f, 0.95f)
         );
+
+        // Unclipped Floating Sound-Level Checkpoint Pop-Up Card (rendered last so it floats cleanly above all rows!)
+        if (draggingSoundSensitivity_ || hoveredHitId_ == static_cast<int>(HitId::RecSoundSensitivitySlider)) {
+            drawSoundCheckpointPopup(rt, soundSensitivityRectDip_, stageLeft + 14.0f, stageRight - 14.0f);
+        }
     } else {
         // ---------------------------------------------------------------------
         // B. ENCRYPTED VAULT PLAYER STAGE
@@ -1773,6 +2105,13 @@ void AppWindow::onMouseDown(D2D1_POINT_2F ptDip) {
         return;
     }
 
+    if (hit == static_cast<int>(HitId::RecSoundSensitivitySlider)) {
+        draggingSoundSensitivity_ = true;
+        SetCapture(hwnd_);
+        onMouseMove(ptDip);
+        return;
+    }
+
     if (hit == static_cast<int>(HitId::PlayerScrubberTrack) && player_.hasClipLoaded()) {
         draggingScrubber_ = true;
         wasPlayingBeforeScrub_ = player_.isPlaying();
@@ -1793,6 +2132,22 @@ void AppWindow::onMouseMove(D2D1_POINT_2F ptDip) {
         double pct = std::round(10.0 + frac * 90.0);
         capture_.motionDetector().setSensitivityPercent(pct);
         savePreferences();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    if (draggingSoundSensitivity_) {
+        float leftX = soundSensitivityRectDip_.left + 8.0f;
+        float rightX = soundSensitivityRectDip_.right - 8.0f;
+        float frac = std::clamp((ptDip.x - leftX) / std::max(1.0f, rightX - leftX), 0.0f, 1.0f);
+        double rawPct = 10.0 + frac * 90.0;
+        double snappedPct = SoundSensitivityCheckpoint::snapIfClose(rawPct, 1.6);
+        capture_.soundDetector().setSensitivityPercent(snappedPct);
+        if (!isWakeOnSoundEnabled_) {
+            setWakeOnSoundEnabled(true);
+        } else {
+            savePreferences();
+        }
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -1818,6 +2173,14 @@ void AppWindow::onMouseMove(D2D1_POINT_2F ptDip) {
 void AppWindow::onMouseUp(D2D1_POINT_2F ptDip) {
     if (draggingSensitivity_) {
         draggingSensitivity_ = false;
+        ReleaseCapture();
+        pressedHitId_ = 0;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    if (draggingSoundSensitivity_) {
+        draggingSoundSensitivity_ = false;
         ReleaseCapture();
         pressedHitId_ = 0;
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1891,6 +2254,8 @@ void AppWindow::dispatchHitCommand(int hitId) {
     case HitId::RecMicPopup:            showMicPopupMenu(); break;
     case HitId::RecAudioOnSeg:          setRecordAudioEnabled(true); break;
     case HitId::RecAudioOffSeg:         setRecordAudioEnabled(false); break;
+    case HitId::RecWakeOnSoundToggle:   setWakeOnSoundEnabled(!isWakeOnSoundEnabled_); break;
+    case HitId::RecMaxBrightnessToggle: setMaxBrightnessWhenLockedEnabled(!sleepAndLock_.isMaxBrightnessWhenLocked()); break;
     case HitId::SidebarPasswordSettings:showPasswordSettingsDialog(); break;
     case HitId::PlayerLockedBackCamBtn:
     case HitId::PlayerLockAndCamBtn:    setStageMode(false); break;
@@ -1940,25 +2305,27 @@ void AppWindow::handleMenuCommand(WORD cmdId) {
     }
 
     switch (cmdId) {
-    case IDM_APP_ABOUT:             showAboutDialog(); break;
-    case IDM_APP_PASSWORD_SETTINGS: showPasswordSettingsDialog(); break;
-    case IDM_APP_LOCK_VAULT:        lockVaultImmediately(false); break;
-    case IDM_APP_QUIT:              quitApplicationCleanly(); break;
-    case IDM_REC_TOGGLE_ARM:        toggleArmedAction(); break;
-    case IDM_REC_TOGGLE_AUDIO:      setRecordAudioEnabled(!isAudioRecordingEnabled_); break;
-    case IDM_REC_CHOOSE_SAVE_FOLDER:promptForSaveFolderInteractive(); break;
-    case IDM_REC_EXPORT_MP4:        exportCurrentClipSaveAsAction(); break;
-    case IDM_PLAY_ALL:              playAllAction(); break;
-    case IDM_PLAY_PAUSE:            if (isInPlayerMode_ && vault_.isUnlocked()) togglePlayPauseAction(); break;
-    case IDM_PLAY_SPEED_1X:         setPlaybackSpeedAction(1.0f); break;
-    case IDM_PLAY_SPEED_4X:         setPlaybackSpeedAction(4.0f); break;
-    case IDM_PLAY_SPEED_12X:        setPlaybackSpeedAction(12.0f); break;
-    case IDM_PLAY_MUTE_TOGGLE:      togglePlayerMuteAction(); break;
-    case IDM_PLAY_PREV_CLIP:        prevClipAction(); break;
-    case IDM_PLAY_NEXT_CLIP:        nextClipAction(false); break;
-    case IDM_PLAY_SAVE_AND_NEXT:    saveAndNextAction(); break;
-    case IDM_PLAY_DELETE_AND_NEXT:  deleteAndNextAction(); break;
-    case IDM_WIN_SWITCH_MODE:       setStageMode(!isInPlayerMode_); break;
+    case IDM_APP_ABOUT:                 showAboutDialog(); break;
+    case IDM_APP_PASSWORD_SETTINGS:     showPasswordSettingsDialog(); break;
+    case IDM_APP_LOCK_VAULT:            lockVaultImmediately(false); break;
+    case IDM_APP_QUIT:                  quitApplicationCleanly(); break;
+    case IDM_REC_TOGGLE_ARM:            toggleArmedAction(); break;
+    case IDM_REC_TOGGLE_AUDIO:          setRecordAudioEnabled(!isAudioRecordingEnabled_); break;
+    case IDM_REC_TOGGLE_WAKE_SOUND:     setWakeOnSoundEnabled(!isWakeOnSoundEnabled_); break;
+    case IDM_REC_TOGGLE_MAX_BRIGHTNESS: setMaxBrightnessWhenLockedEnabled(!sleepAndLock_.isMaxBrightnessWhenLocked()); break;
+    case IDM_REC_CHOOSE_SAVE_FOLDER:    promptForSaveFolderInteractive(); break;
+    case IDM_REC_EXPORT_MP4:            exportCurrentClipSaveAsAction(); break;
+    case IDM_PLAY_ALL:                  playAllAction(); break;
+    case IDM_PLAY_PAUSE:                if (isInPlayerMode_ && vault_.isUnlocked()) togglePlayPauseAction(); break;
+    case IDM_PLAY_SPEED_1X:             setPlaybackSpeedAction(1.0f); break;
+    case IDM_PLAY_SPEED_4X:             setPlaybackSpeedAction(4.0f); break;
+    case IDM_PLAY_SPEED_12X:            setPlaybackSpeedAction(12.0f); break;
+    case IDM_PLAY_MUTE_TOGGLE:          togglePlayerMuteAction(); break;
+    case IDM_PLAY_PREV_CLIP:            prevClipAction(); break;
+    case IDM_PLAY_NEXT_CLIP:            nextClipAction(false); break;
+    case IDM_PLAY_SAVE_AND_NEXT:        saveAndNextAction(); break;
+    case IDM_PLAY_DELETE_AND_NEXT:      deleteAndNextAction(); break;
+    case IDM_WIN_SWITCH_MODE:           setStageMode(!isInPlayerMode_); break;
     case IDM_WIN_SHOW_MAIN:
         ShowWindow(hwnd_, SW_RESTORE);
         ShowWindow(hwnd_, SW_SHOW);
@@ -2086,6 +2453,9 @@ void AppWindow::lockVaultImmediately(bool keepCameraStage) {
 void AppWindow::toggleArmedAction() {
     if (isArmed_) {
         isArmed_ = false;
+        lowDiskSpaceWarning_ = false;
+        capture_.setArmedForPreRoll(false);
+        capture_.soundDetector().setEnabled(false);
         stopCurrentRecordingClipSynchronously();
         sleepAndLock_.setArmedPreventingIdleSleep(false);
         updateTrayIcon();
@@ -2100,7 +2470,11 @@ void AppWindow::toggleArmedAction() {
     // Security invariant: arming switches to Live Camera and locks the vault immediately!
     setStageMode(false);
     vault_.lock();
+    lowDiskSpaceWarning_ = !hasSufficientVaultDiskSpace();
     capture_.motionDetector().resetWarmup(1.1);
+    capture_.soundDetector().reset(1.1);
+    capture_.soundDetector().setEnabled(isWakeOnSoundEnabled_ && isAudioRecordingEnabled_);
+    capture_.setArmedForPreRoll(true);
     isArmed_ = true;
     sleepAndLock_.setArmedPreventingIdleSleep(true);
     updateTrayIcon();
@@ -2109,7 +2483,14 @@ void AppWindow::toggleArmedAction() {
 
 void AppWindow::setRecordAudioEnabled(bool enabled) {
     isAudioRecordingEnabled_ = enabled;
+    if (!enabled && isWakeOnSoundEnabled_) {
+        isWakeOnSoundEnabled_ = false;
+        if (hMenuBar_) {
+            CheckMenuItem(hMenuBar_, IDM_REC_TOGGLE_WAKE_SOUND, MF_BYCOMMAND | MF_UNCHECKED);
+        }
+    }
     capture_.setSampleAudioEnabled(enabled);
+    capture_.soundDetector().setEnabled(isArmed_ && isWakeOnSoundEnabled_ && enabled);
     savePreferences();
 
     if (hMenuBar_) {
@@ -2125,7 +2506,46 @@ void AppWindow::setRecordAudioEnabled(bool enabled) {
             ? audioDevices_[selectedAudioIdx_].id : L"";
         capture_.startCapture(camId, micId, enabled);
     }
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    updateTrayIcon();
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void AppWindow::setWakeOnSoundEnabled(bool enabled) {
+    // Strictly additive to motion detection ("Also Wake on Sound?") — NEVER replaces motion!
+    if (enabled && !isAudioRecordingEnabled_) {
+        setRecordAudioEnabled(true);
+    }
+    isWakeOnSoundEnabled_ = enabled;
+    capture_.soundDetector().setEnabled(isArmed_ && isWakeOnSoundEnabled_ && isAudioRecordingEnabled_);
+    if (enabled) {
+        capture_.soundDetector().reset(0.35);
+    }
+
+    if (hMenuBar_) {
+        CheckMenuItem(
+            hMenuBar_,
+            IDM_REC_TOGGLE_WAKE_SOUND,
+            MF_BYCOMMAND | (isWakeOnSoundEnabled_ ? MF_CHECKED : MF_UNCHECKED)
+        );
+    }
+
+    savePreferences();
+    updateTrayIcon();
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void AppWindow::setMaxBrightnessWhenLockedEnabled(bool enabled) {
+    sleepAndLock_.setMaxBrightnessWhenLocked(enabled);
+    if (hMenuBar_) {
+        CheckMenuItem(
+            hMenuBar_,
+            IDM_REC_TOGGLE_MAX_BRIGHTNESS,
+            MF_BYCOMMAND | (sleepAndLock_.isMaxBrightnessWhenLocked() ? MF_CHECKED : MF_UNCHECKED)
+        );
+    }
+    savePreferences();
+    updateTrayIcon();
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void AppWindow::showCameraPopupMenu() {
@@ -2166,8 +2586,23 @@ void AppWindow::openWindowsPrivacySettings() {
     ShellExecuteW(hwnd_, L"open", L"ms-settings:privacy-webcam", nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+bool AppWindow::hasSufficientVaultDiskSpace(uint64_t minimumBytes) const {
+    ULARGE_INTEGER freeAvail{};
+    if (!GetDiskFreeSpaceExW(vault_.vaultDirectoryPath().c_str(), &freeAvail, nullptr, nullptr)) {
+        return true;
+    }
+    return freeAvail.QuadPart >= minimumBytes;
+}
+
 void AppWindow::handleMotionTriggeredOnMain() {
+    handleTriggerOnMain(TriggerKind::Motion);
+}
+
+void AppWindow::handleTriggerOnMain(TriggerKind kind) {
     if (!isArmed_ || isTerminating_) return;
+    if (kind == TriggerKind::Sound && !(isWakeOnSoundEnabled_ && isAudioRecordingEnabled_)) {
+        return;
+    }
 
     auto now = std::chrono::steady_clock::now();
     auto minHold = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -2176,11 +2611,24 @@ void AppWindow::handleMotionTriggeredOnMain() {
     auto newDeadline = now + minHold;
 
     if (isRecordingClip_) {
+        if (kind == TriggerKind::Motion) {
+            hasMotionTriggerInActiveClip_ = true;
+        } else {
+            hasSoundTriggerInActiveClip_ = true;
+        }
         if (newDeadline > recordingDeadlineSteady_) {
             recordingDeadlineSteady_ = newDeadline;
         }
+        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
+
+    if (!hasSufficientVaultDiskSpace()) {
+        lowDiskSpaceWarning_ = true;
+        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    lowDiskSpaceWarning_ = false;
 
     // Strict locked-while-saving room-tamper guard
     if (vault_.isUnlocked()) {
@@ -2198,9 +2646,12 @@ void AppWindow::handleMotionTriggeredOnMain() {
 
         auto clipWriter = vault_.createClipWriter(w, h, recAudio);
         auto segWriter = std::make_shared<VaultSegmentWriter>(std::move(clipWriter), w, h, recAudio);
+        // Attaching active segment writer flushes the 1.25s RAM pre-roll buffer cleanly into the new clip!
         capture_.attachActiveSegmentWriter(segWriter);
 
         isRecordingClip_ = true;
+        hasMotionTriggerInActiveClip_ = (kind == TriggerKind::Motion);
+        hasSoundTriggerInActiveClip_ = (kind == TriggerKind::Sound);
         recordingStartedSteady_ = now;
         recordingDeadlineSteady_ = newDeadline;
         sleepAndLock_.setRecordingShutdownGuard(true);
@@ -2213,6 +2664,8 @@ void AppWindow::handleMotionTriggeredOnMain() {
 void AppWindow::stopCurrentRecordingClipSynchronously() {
     auto activeWriter = capture_.detachActiveSegmentWriter();
     isRecordingClip_ = false;
+    hasMotionTriggerInActiveClip_ = false;
+    hasSoundTriggerInActiveClip_ = false;
     sleepAndLock_.setRecordingShutdownGuard(false);
 
     if (activeWriter) {
@@ -2518,11 +2971,13 @@ void AppWindow::showPasswordSettingsDialog() {
 
 void AppWindow::showAboutDialog() {
     const wchar_t* text =
-        L"Max Watch (v1.3.0)\n\n"
-        L"A free, 100% offline, encrypted motion-detection security camera & video vault for Mac and Windows - gifted to the community by Max Freedom Pollard.\n\n"
+        L"Max Watch (v1.4.0)\n\n"
+        L"A free, 100% offline, encrypted motion & sound security camera & video vault for Mac and Windows - gifted to the community by Max Freedom Pollard.\n\n"
         L"• Zero network access (zero network socket DLLs imported)\n"
+        L"• Additive 'Also Wake on Sound?' (never replaces motion) + 5 pop-up sound-level checkpoints\n"
+        L"• Default-ON Max Brightness When Locked (Win+L) to illuminate pitch-dark rooms at night\n"
+        L"• 1.25-second RAM Pre-Roll Ring Buffer (zero disk writes) + adaptive night motion detection\n"
         L"• Vault stays strictly locked while arming & saving clips against room tampering\n"
-        L"• Works continuously even while your PC screen is locked (Win+L)\n"
         L"• Unambiguous international computer-time stamp on every clip\n"
         L"• One-click Audio ON / OFF switch for video-with-audio or silent video-only capture\n"
         L"• AES-256-GCM encrypted vault + password-locked Play All\n"
@@ -2530,12 +2985,15 @@ void AppWindow::showAboutDialog() {
         L"• Fast-drag timeline scrubber ball + 1x / 4x / 12x playback\n"
         L"• One-click Save & Next (to any PC folder) + Delete & Next\n\n"
         L"Stay safe, stay peaceful, and take good care of each other.";
-    MessageBoxW(hwnd_, text, L"About Max Watch (v1.3.0)", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(hwnd_, text, L"About Max Watch (v1.4.0)", MB_OK | MB_ICONINFORMATION);
 }
 
 void AppWindow::quitApplicationCleanly() {
     isTerminating_ = true;
     KillTimer(hwnd_, kTimerIdMainUI);
+    isArmed_ = false;
+    capture_.setArmedForPreRoll(false);
+    capture_.soundDetector().setEnabled(false);
     sleepAndLock_.setArmedPreventingIdleSleep(false);
     stopCurrentRecordingClipSynchronously();
     capture_.stopCapture();
@@ -2547,6 +3005,14 @@ void AppWindow::quitApplicationCleanly() {
 
 void AppWindow::onPeriodicTimerTick() {
     auto now = std::chrono::steady_clock::now();
+    double nowMonoSec = std::chrono::duration<double>(now.time_since_epoch()).count();
+
+    // Reinforce 100% lock-screen night brightness & check vault free disk space every ~2.0s
+    sleepAndLock_.periodicMaintenanceTick(nowMonoSec);
+    if (isArmed_ && std::chrono::duration<double>(now - lastMaintenanceTickSteady_).count() >= 2.0) {
+        lastMaintenanceTickSteady_ = now;
+        lowDiskSpaceWarning_ = !hasSufficientVaultDiskSpace();
+    }
 
     // Check recording deadline
     if (isRecordingClip_ && now >= recordingDeadlineSteady_) {
@@ -2586,14 +3052,24 @@ void AppWindow::runSmokeTestStep() {
         }
         capture_.motionDetector().resetWarmup(0.0);
         capture_.motionDetector().setSensitivityPercent(92.0);
+        capture_.soundDetector().setSensitivityPercent(55.0); // "Normal Talking Voice" (-30 dB)
+        setWakeOnSoundEnabled(true);
+        capture_.setArmedForPreRoll(true);
         isArmed_ = true;
+        capture_.soundDetector().setEnabled(true);
         handleMotionTriggeredOnMain();
+    } else if (smokeTickCounter_ == 32) {
+        hoveredHitId_ = static_cast<int>(HitId::RecSoundSensitivitySlider);
     } else if (smokeTickCounter_ == 34) {
-        // ~2.7 seconds into active synthetic motion recording: render & export Live Motion Studio screenshot!
+        // ~2.7 seconds into active synthetic recording: render & export Live Studio + Sound Checkpoint Pop-Up!
+        hoveredHitId_ = static_cast<int>(HitId::RecSoundSensitivitySlider);
         saveCurrentSceneToPng((outDir / L"windows_live_studio.png").wstring(), 1300, 800);
     } else if (smokeTickCounter_ == 42) {
         // Finalize clip, unlock vault, switch to Vault Player, load clip, scrub to 1.2s
+        hoveredHitId_ = 0;
         isArmed_ = false;
+        capture_.setArmedForPreRoll(false);
+        capture_.soundDetector().setEnabled(false);
         stopCurrentRecordingClipSynchronously();
         vault_.unlock("smoke-pass-1234");
         isInPlayerMode_ = true;
@@ -2661,7 +3137,7 @@ LRESULT AppWindow::handleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
         UINT dpi = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
         mmi->ptMinTrackSize.x = MulDiv(1150, static_cast<int>(dpi), 96);
-        mmi->ptMinTrackSize.y = MulDiv(680, static_cast<int>(dpi), 96);
+        mmi->ptMinTrackSize.y = MulDiv(700, static_cast<int>(dpi), 96);
         return 0;
     }
 
@@ -2713,7 +3189,11 @@ LRESULT AppWindow::handleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_APP_MOTION_TRIGGERED:
-        handleMotionTriggeredOnMain();
+        handleTriggerOnMain(TriggerKind::Motion);
+        return 0;
+
+    case WM_APP_SOUND_TRIGGERED:
+        handleTriggerOnMain(TriggerKind::Sound);
         return 0;
 
     case WM_APP_PLAYER_CLIP_ENDED:
@@ -2749,7 +3229,12 @@ LRESULT AppWindow::handleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 nid.uID = 1;
                 nid.uFlags = NIF_INFO;
                 wcscpy_s(nid.szInfoTitle, L"Max Watch Armed in System Tray");
-                wcscpy_s(nid.szInfo, L"Motion detection continues in the background. Click the MF tray icon to reopen or choose Quit Max Watch (Ctrl+Q).");
+                wcscpy_s(
+                    nid.szInfo,
+                    isWakeOnSoundEnabled_
+                        ? L"Motion + Sound detection continues in the background. Click the MF tray icon to reopen or Quit (Ctrl+Q)."
+                        : L"Motion detection continues in the background. Click the MF tray icon to reopen or Quit (Ctrl+Q)."
+                );
                 nid.dwInfoFlags = NIIF_INFO;
                 Shell_NotifyIconW(NIM_MODIFY, &nid);
             }
@@ -2759,12 +3244,16 @@ LRESULT AppWindow::handleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_QUERYENDSESSION:
+        capture_.setArmedForPreRoll(false);
+        sleepAndLock_.setArmedPreventingIdleSleep(false);
         stopCurrentRecordingClipSynchronously();
         vault_.lock();
         return TRUE;
 
     case WM_ENDSESSION:
         if (wParam == TRUE) {
+            capture_.setArmedForPreRoll(false);
+            sleepAndLock_.setArmedPreventingIdleSleep(false);
             stopCurrentRecordingClipSynchronously();
             vault_.lock();
         }

@@ -4,6 +4,7 @@
 #include "TimestampStamper.hpp"
 #include "VaultCrypto.hpp"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -30,10 +31,14 @@ struct BgraFrame {
     std::vector<uint8_t> pixels; // width * height * 4 (BGRA32)
 };
 
-// Studio Motion Detector (exact match to macOS AppController luma-grid & sensitivity curve)
+// Studio Motion Detector (exact match to macOS AppController luma-grid, adaptive night contrast & sensitivity curve)
 class MotionDetector {
 public:
     MotionDetector();
+
+    // Smoothly lowers per-cell luma diff threshold in dark/night rooms (meanLuma < 50)
+    // from 14 down to 9 so dim silhouettes under lock-screen illumination trigger reliably.
+    static int adaptiveCellDeltaFloor(double meanLuma);
 
     void setSensitivityPercent(double pct);
     double sensitivityPercent() const { return sensitivityPercent_.load(); }
@@ -44,6 +49,7 @@ public:
 
     struct EvalResult {
         double scorePercent = 0.0;
+        double meanLuma = 0.0;
         bool triggered = false;
     };
 
@@ -63,6 +69,73 @@ private:
     std::vector<uint8_t> prevGrid_;
     double prevMean_ = 0.0;
     int consecutiveHits_ = 0;
+    double warmupUntilSec_ = 0.0;
+};
+
+// Sound-level checkpoints & examples for "Also Wake on Sound?" drag slider (exact match to macOS SoundDetection.swift)
+struct SoundSensitivityCheckpoint {
+    double percent = 55.0;
+    const wchar_t* title = L"Normal Talking Voice";
+    const wchar_t* examples = L"Everyday conversation in room, phone/TV audio, door opening";
+
+    double thresholdDB() const;
+
+    static const std::array<SoundSensitivityCheckpoint, 5>& all();
+    static SoundSensitivityCheckpoint nearest(double pct);
+    static double snapIfClose(double rawPercent, double tolerance = 1.6);
+};
+
+struct SoundEvaluation {
+    float filteredDB = -60.0f;
+    float thresholdDB = -30.0f;
+    bool triggered = false;
+};
+
+// Studio Acoustic Wake Detector (additive to motion detection — NEVER replaces motion!)
+// Uses 1st-order ~85 Hz high-pass filter @ 48 kHz + 50 ms RMS dBFS windows + 2-of-3 window debounce.
+class SoundDetector {
+public:
+    static constexpr double kDefaultSensitivityPercent = 55.0; // -30.0 dB ("Normal Talking Voice")
+
+    SoundDetector();
+
+    static double thresholdDBForPercent(double percent);
+    static double meterFractionForDB(double db);
+
+    void setEnabled(bool enabled);
+    bool isEnabled() const { return enabled_.load(); }
+
+    void setSensitivityPercent(double pct);
+    double sensitivityPercent() const { return sensitivityPercent_.load(); }
+    double thresholdDB() const { return thresholdDB_.load(); }
+
+    std::wstring readoutLabelWide() const;
+
+    void reset(double warmupSeconds = 0.45);
+    void resetUntilTimestamp(double warmupUntilMonotonicSec);
+    void applyAcousticGrace(double graceSeconds);
+    void applyAcousticGraceUntil(double untilMonotonicSec);
+
+    SoundEvaluation analyzePCM16Mono(
+        const int16_t* samples,
+        size_t count,
+        int sampleRate,
+        double nowMonotonicSec
+    );
+
+private:
+    std::atomic<bool> enabled_{false};
+    std::atomic<double> sensitivityPercent_{kDefaultSensitivityPercent};
+    std::atomic<double> thresholdDB_{-30.0};
+
+    std::mutex mutex_;
+    static constexpr double kHpfAlpha = 0.9890;
+    double prevIn_ = 0.0;
+    double prevOut_ = 0.0;
+    double windowSqSum_ = 0.0;
+    int windowSampleCount_ = 0;
+    std::array<bool, 3> recentWindowHits_{{false, false, false}};
+    float latestFilteredDB_ = -60.0f;
     double warmupUntilSec_ = 0.0;
 };
 
@@ -160,7 +233,7 @@ private:
     std::thread workerThread_;
 };
 
-// Live Webcam + WASAPI Microphone Capture Engine
+// Live Webcam + WASAPI Microphone Capture Engine (with 1.25s RAM Pre-Roll Ring Buffer)
 class CaptureEngine {
 public:
     CaptureEngine();
@@ -188,24 +261,56 @@ public:
 
     bool copyLatestPreviewFrame(BgraFrame& outFrame) const;
     double latestMotionPercent() const { return latestMotionPct_.load(); }
+    double latestMeanLuma() const { return latestMeanLuma_.load(); }
     float latestAudioDb() const { return latestAudioDb_.load(); }
 
     MotionDetector& motionDetector() { return motionDetector_; }
     const MotionDetector& motionDetector() const { return motionDetector_; }
 
+    SoundDetector& soundDetector() { return soundDetector_; }
+    const SoundDetector& soundDetector() const { return soundDetector_; }
+
+    // Controls 1.25s RAM pre-roll buffering while armed; securely wipes RAM buffers immediately when false.
+    void setArmedForPreRoll(bool armed);
+    bool isArmedForPreRoll() const { return armedForPreRoll_.load(); }
+
+    void applyLockKeyAcousticGrace(double graceSeconds = 0.70);
+
     void attachActiveSegmentWriter(std::shared_ptr<VaultSegmentWriter> writer);
     std::shared_ptr<VaultSegmentWriter> detachActiveSegmentWriter();
     std::shared_ptr<VaultSegmentWriter> currentSegmentWriter() const;
 
-    void setSampleAudioEnabled(bool enabled) { sampleAudioEnabled_.store(enabled); }
+    void setSampleAudioEnabled(bool enabled);
 
     std::function<void()> onMotionTriggered;
+    std::function<void()> onSoundTriggered;
 
 private:
+    struct PreRollVideoItem {
+        std::vector<uint8_t> nv12;
+        int width = 0;
+        int height = 0;
+        int64_t pts100ns = 0;
+        int64_t captureUnixMs = -1;
+    };
+    struct PreRollAudioItem {
+        std::vector<int16_t> pcm;
+        int64_t pts100ns = 0;
+    };
+
     void videoCaptureLoop(std::wstring videoDeviceId, bool syntheticMode);
     void audioCaptureLoop(std::wstring audioDeviceId);
+    void routeCapturedVideoFrame(
+        const uint8_t* yPlane, int yStride,
+        const uint8_t* uvPlane, int uvStride,
+        int w, int h,
+        int64_t pts100ns
+    );
+    void routeCapturedAudioChunk(const int16_t* samples, size_t count, int64_t pts100ns);
+    void wipePreRollLocked();
 
     MotionDetector motionDetector_;
+    SoundDetector soundDetector_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> audioRunning_{false};
@@ -213,9 +318,11 @@ private:
     std::atomic<bool> cameraPermissionDenied_{false};
     std::atomic<bool> micActive_{false};
     std::atomic<bool> sampleAudioEnabled_{true};
+    std::atomic<bool> armedForPreRoll_{false};
     std::atomic<int> activeWidth_{1280};
     std::atomic<int> activeHeight_{720};
     std::atomic<double> latestMotionPct_{0.0};
+    std::atomic<double> latestMeanLuma_{90.0};
     std::atomic<float> latestAudioDb_{-60.0f};
 
     mutable std::mutex summaryMutex_;
@@ -227,6 +334,9 @@ private:
 
     mutable std::mutex writerMutex_;
     std::shared_ptr<VaultSegmentWriter> activeWriter_;
+    std::deque<PreRollVideoItem> preRollVideo_;
+    std::deque<PreRollAudioItem> preRollAudio_;
+    size_t preRollAudioSamples_ = 0;
 
     std::thread videoThread_;
     std::thread audioThread_;

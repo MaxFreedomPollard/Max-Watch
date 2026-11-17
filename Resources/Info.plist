@@ -23,13 +23,13 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3.0</string>
+	<string>1.4.0</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>DTCompiler</key>
 	<string>com.apple.compilers.llvm.clang.1_0</string>
 	<key>DTPlatformBuild</key>
@@ -59,7 +59,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Free gift to the community by Max Freedom Pollard. 100% Offline.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Max Watch uses your Mac microphone locally to record clear sound alongside encrypted motion clips.</string>
+	<string>Max Watch uses your Mac microphone locally for optional sound-wake detection and to record clear audio alongside encrypted clips.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

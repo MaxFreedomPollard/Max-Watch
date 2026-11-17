@@ -240,7 +240,7 @@ void verifyZeroNetworkDllImportsInCurrentExecutable() {
 
 int runAutomatedSelfTest(const std::wstring& scratchDir) {
     try {
-        std::cout << "=== Max Watch Windows 14-Stage Automated Verification Suite ===" << std::endl;
+        std::cout << "=== Max Watch Windows 16-Stage Automated Verification Suite ===" << std::endl;
 
         std::filesystem::path rootPath = scratchDir.empty()
             ? (std::filesystem::temp_directory_path() / L"MaxWatch_SelfTest")
@@ -258,7 +258,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 1: RFC 7748 X25519 Vectors & Vault Initialization (Starts LOCKED)
         // ---------------------------------------------------------------------
-        std::cout << "[1/14] Verifying RFC 7748 X25519 vectors & Vault initialization (starts LOCKED)..." << std::endl;
+        std::cout << "[1/16] Verifying RFC 7748 X25519 vectors & Vault initialization (starts LOCKED)..." << std::endl;
         {
             auto alicePrivVec = hexToBytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
             auto bobPrivVec   = hexToBytes("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
@@ -290,7 +290,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 2: Record Clip #1 WHILE LOCKED + Simulated Hard Power Cut
         // ---------------------------------------------------------------------
-        std::cout << "[2/14] Recording 1280x720 H.264+AAC Clip #1 WHILE LOCKED + simulating sudden power loss..." << std::endl;
+        std::cout << "[2/16] Recording 1280x720 H.264+AAC Clip #1 WHILE LOCKED + simulating sudden power loss..." << std::endl;
         std::wstring powerCutClipPath;
         {
             auto clipWriter = vault.createClipWriter(1280, 720, true);
@@ -319,7 +319,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 3: Record Clip #2 WHILE LOCKED + Clean Exit Save + Zero Plaintext Check
         // ---------------------------------------------------------------------
-        std::cout << "[3/14] Recording Clip #2 WHILE LOCKED + verifying clean exit flush & zero disk plaintext..." << std::endl;
+        std::cout << "[3/16] Recording Clip #2 WHILE LOCKED + verifying clean exit flush & zero disk plaintext..." << std::endl;
         std::wstring cleanClipPath;
         {
             auto clipWriter = vault.createClipWriter(1280, 720, true);
@@ -344,7 +344,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 4: Unlock Vault & Verify Power-Cut Recovery + Clean Finalization
         // ---------------------------------------------------------------------
-        std::cout << "[4/14] Unlocking vault & verifying power-cut tail recovery + clean-exit metadata..." << std::endl;
+        std::cout << "[4/16] Unlocking vault & verifying power-cut tail recovery + clean-exit metadata..." << std::endl;
         checkTrue(vault.unlock("initial-pass-1234"), "Valid vault password must unlock");
         checkTrue(vault.isUnlocked(), "Vault must report unlocked");
 
@@ -366,7 +366,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 5: Zero-Disk-Plaintext RAM Playback (1x / 4x / 12x) & Fast Ball Scrubbing
         // ---------------------------------------------------------------------
-        std::cout << "[5/14] Verifying zero-disk-plaintext RAM playback (1x / 4x / 12x) & fast ball scrubbing..." << std::endl;
+        std::cout << "[5/16] Verifying zero-disk-plaintext RAM playback (1x / 4x / 12x) & fast ball scrubbing..." << std::endl;
         {
             // Verify both power-cut recovered clip AND clean clip open & decode in RAM!
             for (const std::wstring& targetClip : {powerCutClipPath, cleanClipPath}) {
@@ -421,7 +421,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 6: Save & Next External .MP4 Export + Inside-Vault Guard
         // ---------------------------------------------------------------------
-        std::cout << "[6/14] Verifying Save & Next external .mp4 export & independent Media Foundation decode..." << std::endl;
+        std::cout << "[6/16] Verifying Save & Next external .mp4 export & independent Media Foundation decode..." << std::endl;
         {
             bool insideVaultBlocked = false;
             try {
@@ -440,7 +440,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 7: O(1) Vault Password Rotation
         // ---------------------------------------------------------------------
-        std::cout << "[7/14] Verifying O(1) Curve25519 private-key re-wrap password rotation..." << std::endl;
+        std::cout << "[7/16] Verifying O(1) Curve25519 private-key re-wrap password rotation..." << std::endl;
         {
             vault.changePassword("initial-pass-1234", "rotated-pass-5678");
             vault.lock();
@@ -454,7 +454,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 8: Delete & Next Secure 128 KB Zero-Wipe
         // ---------------------------------------------------------------------
-        std::cout << "[8/14] Verifying Delete & Next secure zero-wipe deletion..." << std::endl;
+        std::cout << "[8/16] Verifying Delete & Next secure zero-wipe deletion..." << std::endl;
         {
             vault.secureDeleteClip(powerCutClipPath);
             checkTrue(!std::filesystem::exists(powerCutClipPath), "Zero-wiped clip must be unlinked from disk");
@@ -464,7 +464,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 9: Unambiguous International Timestamp Format & NV12 Pixel Burn-In
         // ---------------------------------------------------------------------
-        std::cout << "[9/14] Verifying unambiguous bottom-left timestamp format & NV12 pixel burn-in..." << std::endl;
+        std::cout << "[9/16] Verifying unambiguous bottom-left timestamp format & NV12 pixel burn-in..." << std::endl;
         {
             const int64_t sampleMs = 1763194534000LL; // Nov 2025/2026 sample epoch
             std::string s12 = ClipTimestampFormatter::formatExplicitUtf8(sampleMs, true);
@@ -502,7 +502,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 10: Audio OFF (Silent Video-Only) Recording & Multi-Speed Playback
         // ---------------------------------------------------------------------
-        std::cout << "[10/14] Verifying Audio OFF (hasAudio == false) video-only recording & playback..." << std::endl;
+        std::cout << "[10/16] Verifying Audio OFF (hasAudio == false) video-only recording & playback..." << std::endl;
         {
             vault.lock();
             std::wstring silentClipPath;
@@ -533,7 +533,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 11: MotionDetector Curve, Global Brightness Immunity & 2-Hit Trigger
         // ---------------------------------------------------------------------
-        std::cout << "[11/14] Verifying MotionDetector studio curve, global brightness immunity & 2-hit debounce..." << std::endl;
+        std::cout << "[11/16] Verifying MotionDetector studio curve, global brightness immunity & 2-hit debounce..." << std::endl;
         {
             MotionDetector md;
             md.setSensitivityPercent(100.0);
@@ -579,7 +579,7 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 12: Cross-Platform macOS CryptoKit MWV1 Vault Unlock & Decryption
         // ---------------------------------------------------------------------
-        std::cout << "[12/14] Verifying byte-for-byte macOS CryptoKit MWV1 cross-platform vault compatibility..." << std::endl;
+        std::cout << "[12/16] Verifying byte-for-byte macOS CryptoKit MWV1 cross-platform vault compatibility..." << std::endl;
         {
             std::filesystem::create_directories(crossOsPath / L"Clips", ec);
             const std::string macManifestJson =
@@ -617,12 +617,17 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 13: SleepAndLockManager Anti-Sleep & WTS_SESSION_LOCK Auto-Lock
         // ---------------------------------------------------------------------
-        std::cout << "[13/14] Verifying Modern Standby anti-sleep request & Win+L screen-lock vault auto-lock..." << std::endl;
+        std::cout << "[13/16] Verifying Modern Standby anti-sleep request & Win+L screen-lock vault auto-lock..." << std::endl;
         {
             if (!vault.isUnlocked()) {
                 checkTrue(vault.unlock("rotated-pass-5678") || vault.unlock("initial-pass-1234"), "Unlock vault for Stage 13 failed");
             }
             SleepAndLockManager slm;
+            checkTrue(slm.isMaxBrightnessWhenLocked(), "Max Brightness When Locked MUST default to true (checked by default)");
+            // Disable brightness boost during Stage 13 OS power-request test so hardware monitors aren't flashed;
+            // Stage 16 deterministically verifies the full brightness boost & restoration state machine!
+            slm.setMaxBrightnessWhenLocked(false);
+
             bool lockCallbackFired = false;
             slm.onScreenLocked = [&]() {
                 lockCallbackFired = true;
@@ -646,12 +651,179 @@ int runAutomatedSelfTest(const std::wstring& scratchDir) {
         // ---------------------------------------------------------------------
         // Stage 14: PE Import Table Audit - Zero Network Socket / HTTP DLLs
         // ---------------------------------------------------------------------
-        std::cout << "[14/14] Auditing PE Import Table for 100% offline zero-network guarantee..." << std::endl;
+        std::cout << "[14/16] Auditing PE Import Table for 100% offline zero-network guarantee..." << std::endl;
         verifyZeroNetworkDllImportsInCurrentExecutable();
 #endif
 
+        // ---------------------------------------------------------------------
+        // Stage 15: Additive SoundDetector (HPF, 50ms dBFS, 2-of-3 Debounce) & Checkpoints
+        // ---------------------------------------------------------------------
+        std::cout << "[15/16] Verifying additive SoundDetector (85 Hz HPF, 2-of-3 debounce) & pop-up checkpoints..." << std::endl;
+        {
+            const auto& cps = SoundSensitivityCheckpoint::all();
+            checkTrue(cps.size() == 5, "Expected 5 sound-level example checkpoints");
+            auto defCp = SoundSensitivityCheckpoint::nearest(55.0);
+            checkTrue(std::wstring(defCp.title) == L"Normal Talking Voice", "55% checkpoint must be 'Normal Talking Voice'");
+            checkTrue(std::abs(defCp.thresholdDB() - (-30.0)) < 0.05, "55% checkpoint must map to -30.0 dBFS");
+            checkTrue(std::abs(SoundSensitivityCheckpoint::snapIfClose(54.1, 1.6) - 55.0) < 0.01, "snapIfClose(54.1) must snap to 55.0%");
+            checkTrue(std::abs(SoundSensitivityCheckpoint::snapIfClose(26.0, 1.6) - 26.0) < 0.01, "snapIfClose(26.0) must preserve raw value between checkpoints");
+
+            SoundDetector sd;
+            checkTrue(!sd.isEnabled(), "SoundDetector must start disabled until 'Also Wake on Sound?' is checked");
+            checkTrue(std::abs(sd.sensitivityPercent() - 55.0) < 0.01, "Default sound sensitivity must be 55% ('Normal Talking Voice')");
+            checkTrue(std::abs(sd.thresholdDB() - (-30.0)) < 0.05, "Default sound threshold must be -30.0 dBFS");
+
+            const int sr = 48000;
+            const size_t winSamples = 2400; // 50 ms @ 48 kHz
+            std::vector<int16_t> loudTone1kHz(winSamples, 0);
+            for (size_t i = 0; i < winSamples; ++i) {
+                double t = static_cast<double>(i) / sr;
+                loudTone1kHz[i] = static_cast<int16_t>(std::sin(t * 2.0 * 3.141592653589793 * 1000.0) * 6000.0); // ~ -17.7 dBFS
+            }
+
+            // 1. Disabled detector must NEVER trigger even on loud speech-band audio
+            sd.resetUntilTimestamp(0.0);
+            for (int w = 0; w < 4; ++w) {
+                auto ev = sd.analyzePCM16Mono(loudTone1kHz.data(), loudTone1kHz.size(), sr, 10.0 + w * 0.05);
+                checkTrue(!ev.triggered, "Disabled SoundDetector must never trigger");
+            }
+
+            // 2. Enabled detector must attenuate deep 18 Hz HVAC / sub-bass rumble via 85 Hz HPF
+            sd.setEnabled(true);
+            sd.setSensitivityPercent(35.0); // -21.0 dBFS ("Loud Voice / Knock / Bark")
+            sd.resetUntilTimestamp(0.0);
+            std::vector<int16_t> subBass18Hz(winSamples, 0);
+            size_t phaseIdx = 0;
+            for (int w = 0; w < 6; ++w) {
+                for (size_t i = 0; i < winSamples; ++i, ++phaseIdx) {
+                    double t = static_cast<double>(phaseIdx) / sr;
+                    // Continuous 18 Hz rumble @ -18 dBFS raw (~4120 peak), attenuated >13 dB below -21 dBFS by 85 Hz HPF
+                    subBass18Hz[i] = static_cast<int16_t>(std::sin(t * 2.0 * 3.141592653589793 * 18.0) * 4120.0);
+                }
+                auto ev = sd.analyzePCM16Mono(subBass18Hz.data(), subBass18Hz.size(), sr, 20.0 + w * 0.05);
+                if (w >= 1) {
+                    checkTrue(!ev.triggered, "85 Hz HPF must reject steady 18 Hz sub-bass HVAC rumble");
+                }
+            }
+
+            // 3. Enabled @ 55% ("Normal Talking Voice", -30 dBFS): 1st 50ms voice-band window arms debounce, 2nd triggers!
+            sd.setSensitivityPercent(55.0);
+            sd.resetUntilTimestamp(0.0);
+            auto evWin1 = sd.analyzePCM16Mono(loudTone1kHz.data(), loudTone1kHz.size(), sr, 30.0);
+            checkTrue(evWin1.filteredDB > -22.0f && !evWin1.triggered, "Single 50ms click/pop must arm 2-of-3 debounce without false triggering");
+            auto evWin2 = sd.analyzePCM16Mono(loudTone1kHz.data(), loudTone1kHz.size(), sr, 30.05);
+            checkTrue(evWin2.triggered, "Sustained voice-band audio across 2-of-3 50ms windows MUST trigger recording");
+
+            // 4. Win+L lock-key acoustic grace suppresses mechanical key-click transient
+            sd.applyAcousticGraceUntil(40.70);
+            auto evGrace1 = sd.analyzePCM16Mono(loudTone1kHz.data(), loudTone1kHz.size(), sr, 40.20);
+            auto evGrace2 = sd.analyzePCM16Mono(loudTone1kHz.data(), loudTone1kHz.size(), sr, 40.25);
+            checkTrue(!evGrace1.triggered && !evGrace2.triggered, "Acoustic grace window must suppress lock-key click");
+        }
+
+        // ---------------------------------------------------------------------
+        // Stage 16: Default-ON Max Brightness When Locked & Adaptive Night Contrast
+        // ---------------------------------------------------------------------
+        std::cout << "[16/16] Verifying default-ON Max Brightness When Locked restoration & night motion contrast..." << std::endl;
+        {
+            class MockBrightnessBackend final : public IDisplayBrightnessBackend {
+            public:
+                int currentLevel = 35;
+                int savedLevel = -1;
+                int captureCalls = 0;
+                int maxCalls = 0;
+                int restoreCalls = 0;
+
+                void captureCurrentBrightnessOnce() override {
+                    savedLevel = currentLevel;
+                    captureCalls++;
+                }
+                void applyMaxBrightness100() override {
+                    currentLevel = 100;
+                    maxCalls++;
+                }
+                void restoreCapturedBrightness() override {
+                    if (savedLevel >= 0) {
+                        currentLevel = savedLevel;
+                        savedLevel = -1;
+                    }
+                    restoreCalls++;
+                }
+            };
+
+            auto mockHw = std::make_shared<MockBrightnessBackend>();
+            {
+                SleepAndLockManager slm(mockHw, /*enableOsPowerRequests=*/false);
+                // Must be checked ON by default!
+                checkTrue(slm.isMaxBrightnessWhenLocked(), "Max Brightness When Locked MUST be checked (true) by default");
+                checkTrue(mockHw->currentLevel == 35, "Initial mock brightness must remain untouched at 35%");
+
+                // Arming while screen is unlocked must NOT alter user's desktop brightness
+                slm.setArmedPreventingIdleSleep(true);
+                checkTrue(mockHw->currentLevel == 35 && !slm.isBrightnessBoostActive(), "Arming while unlocked must keep user brightness at 35%");
+
+                // Locking screen (Win+L) while armed with default-ON option boosts immediately to 100%!
+                slm.simulateScreenLockForTest(true);
+                checkTrue(slm.isBrightnessBoostActive() && mockHw->currentLevel == 100, "Locking screen while armed must boost brightness to 100%");
+                checkTrue(mockHw->captureCalls == 1, "Prior brightness (35%) must be captured once on lock");
+
+                // Periodic maintenance tick reinforces 100% WITHOUT overwriting captured 35% baseline
+                slm.periodicMaintenanceTick(100.0);
+                slm.periodicMaintenanceTick(102.5);
+                checkTrue(mockHw->captureCalls == 1 && mockHw->maxCalls >= 2 && mockHw->currentLevel == 100,
+                          "Periodic maintenance tick must reinforce 100% without clobbering saved 35% baseline");
+
+                // Unchecking option while locked immediately restores 35%; re-checking boosts back to 100%
+                slm.setMaxBrightnessWhenLocked(false);
+                checkTrue(!slm.isBrightnessBoostActive() && mockHw->currentLevel == 35, "Unchecking option must immediately restore 35%");
+                slm.setMaxBrightnessWhenLocked(true);
+                checkTrue(slm.isBrightnessBoostActive() && mockHw->currentLevel == 100, "Re-checking option while armed & locked must boost to 100%");
+
+                // Unlocking screen immediately restores 35%
+                slm.simulateScreenLockForTest(false);
+                checkTrue(!slm.isBrightnessBoostActive() && mockHw->currentLevel == 35, "Unlocking screen must restore exact 35% brightness");
+
+                // Re-locking boosts to 100%, and disarming restores 35%
+                slm.simulateScreenLockForTest(true);
+                checkTrue(mockHw->currentLevel == 100, "Re-locking while armed must boost to 100%");
+                slm.setArmedPreventingIdleSleep(false);
+                checkTrue(!slm.isBrightnessBoostActive() && mockHw->currentLevel == 35, "Disarming must restore exact 35% brightness");
+            }
+
+            // Adaptive night-contrast motion floor verification (meanLuma < 50 lowers cell floor from 14 -> 9)
+            checkTrue(MotionDetector::adaptiveCellDeltaFloor(8.0) == 9, "Pitch-dark scene (luma 8) must lower cell delta floor to 9");
+            checkTrue(MotionDetector::adaptiveCellDeltaFloor(120.0) == 14, "Daylight scene (luma 120) must keep cell delta floor at 14");
+
+            MotionDetector nightMd;
+            nightMd.setSensitivityPercent(78.0);
+            nightMd.resetWarmup(0.0);
+            const double nt0 = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() + 1.0;
+            const int nw = 640, nh = 360;
+            std::vector<uint8_t> darkBase(static_cast<size_t>(nw) * nh, 8);
+            nightMd.analyzeNV12Luma(darkBase.data(), nw, nw, nh, nt0);
+
+            // Subtle +12 luma silhouette in pitch-dark room (would be ignored by daytime floor 14, caught by night floor 9!)
+            std::vector<uint8_t> darkMove1 = darkBase;
+            for (int y = 60; y < 220; ++y) {
+                for (int x = 120; x < 280; ++x) {
+                    darkMove1[static_cast<size_t>(y) * nw + x] = 20;
+                }
+            }
+            auto nr1 = nightMd.analyzeNV12Luma(darkMove1.data(), nw, nw, nh, nt0 + 0.1);
+            checkTrue(nr1.scorePercent > 3.0 && !nr1.triggered, "First low-contrast night frame must register >3% area score");
+
+            std::vector<uint8_t> darkMove2 = darkBase;
+            for (int y = 60; y < 220; ++y) {
+                for (int x = 220; x < 380; ++x) {
+                    darkMove2[static_cast<size_t>(y) * nw + x] = 20;
+                }
+            }
+            auto nr2 = nightMd.analyzeNV12Luma(darkMove2.data(), nw, nw, nh, nt0 + 0.2);
+            checkTrue(nr2.triggered, "Second consecutive low-contrast night silhouette frame MUST trigger motion in dark room");
+        }
+
         std::filesystem::remove_all(rootPath, ec);
-        std::cout << "=== ALL 14 WINDOWS AUTOMATED VERIFICATION STAGES PASSED 100% ===" << std::endl;
+        std::cout << "=== ALL 16 WINDOWS AUTOMATED VERIFICATION STAGES PASSED 100% ===" << std::endl;
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "\n[SELFTEST FAILED] " << ex.what() << std::endl;

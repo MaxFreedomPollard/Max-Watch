@@ -1,5 +1,5 @@
 #define MyAppName "Max Watch"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "Max Freedom Pollard"
 #define MyAppURL "https://github.com/MaxFreedomPollard/Max-Watch"
 #define MyAppExeName "MaxWatch.exe"

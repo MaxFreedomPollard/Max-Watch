@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $WinRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildRoot = Join-Path $WinRoot "build"
 $DistDir = Join-Path $BuildRoot "dist"
-$Version = "1.3.0"
+$Version = "1.4.0"
 
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
@@ -68,7 +68,7 @@ function Invoke-MaxWatchCli {
     }
 }
 
-Write-Host "=== [3/5] Running 14-Stage Automated Cryptographic, Power-Cut & Playback Self-Test ==="
+Write-Host "=== [3/5] Running 16-Stage Automated Cryptographic, Sound-Wake, Night-Brightness & Playback Self-Test ==="
 $SelfTestTmp = Join-Path $BuildRoot "selftest_tmp"
 Invoke-MaxWatchCli -ExePath $HostExe -Arguments @("--selftest", $SelfTestTmp)
 

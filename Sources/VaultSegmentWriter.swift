@@ -246,6 +246,41 @@ final class FrameTimestampStamper {
     }
 }
 
+// MARK: - Bounded RAM-Only Pre-Roll Ring Buffer Types (Zeroed on Disarm)
+
+struct PreRollVideoFrame {
+    var width: Int
+    var height: Int
+    var yPlane: Data
+    var uvPlane: Data
+    var pts: CMTime
+    var captureDate: Date
+
+    mutating func secureWipe() {
+        if !yPlane.isEmpty {
+            yPlane.resetBytes(in: 0..<yPlane.count)
+        }
+        if !uvPlane.isEmpty {
+            uvPlane.resetBytes(in: 0..<uvPlane.count)
+        }
+        yPlane.removeAll(keepingCapacity: false)
+        uvPlane.removeAll(keepingCapacity: false)
+    }
+}
+
+struct PreRollAudioChunk {
+    var pcmData: Data
+    var sampleCount: Int
+    var pts: CMTime
+
+    mutating func secureWipe() {
+        if !pcmData.isEmpty {
+            pcmData.resetBytes(in: 0..<pcmData.count)
+        }
+        pcmData.removeAll(keepingCapacity: false)
+    }
+}
+
 // MARK: - Real-Time 1-Second fMP4 -> AES-256-GCM Segment Writer
 
 final class VaultSegmentWriter: NSObject, AVAssetWriterDelegate {
@@ -358,6 +393,19 @@ final class VaultSegmentWriter: NSObject, AVAssetWriterDelegate {
         clipWriter.writtenChunkCount
     }
 
+    func appendPreRoll(videoFrames: [PreRollVideoFrame], audioChunks: [PreRollAudioChunk]) {
+        guard !videoFrames.isEmpty else { return }
+        writerQueue.async { [weak self] in
+            var frames = videoFrames
+            var chunks = audioChunks
+            defer {
+                for i in frames.indices { frames[i].secureWipe() }
+                for i in chunks.indices { chunks[i].secureWipe() }
+            }
+            self?.appendPreRollOnQueue(videoFrames: frames, audioChunks: chunks)
+        }
+    }
+
     func appendVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer, captureDate: Date = Date()) {
         writerQueue.async { [weak self] in
             self?.appendVideoOnQueue(sampleBuffer, captureDate: captureDate)
@@ -369,6 +417,179 @@ final class VaultSegmentWriter: NSObject, AVAssetWriterDelegate {
         writerQueue.async { [weak self] in
             self?.appendAudioOnQueue(sampleBuffer)
         }
+    }
+
+    private func appendPreRollOnQueue(videoFrames: [PreRollVideoFrame], audioChunks: [PreRollAudioChunk]) {
+        guard !isFinishing,
+              let writer = assetWriter,
+              writer.status == .writing,
+              let vIn = videoInput,
+              let adaptor = pixelBufferAdaptor else { return }
+
+        var audioIndex = 0
+        for frame in videoFrames {
+            guard !isFinishing, writer.status == .writing, frame.pts.isValid else { break }
+
+            if !sessionStarted {
+                firstVideoPTS = frame.pts
+                writer.startSession(atSourceTime: .zero)
+                sessionStarted = true
+            }
+
+            let relPTS = CMTimeSubtract(frame.pts, firstVideoPTS)
+            guard relPTS >= .zero else { continue }
+            if hasAppendedVideoFrame && CMTimeCompare(relPTS, latestVideoRelativePTS) <= 0 {
+                continue
+            }
+
+            var spins = 0
+            while !vIn.isReadyForMoreMediaData && spins < 25 && !isFinishing {
+                Thread.sleep(forTimeInterval: 0.001)
+                spins += 1
+            }
+
+            if vIn.isReadyForMoreMediaData,
+               let stampedPB = makeStampedPixelBuffer(fromPreRoll: frame, adaptor: adaptor) {
+                if adaptor.append(stampedPB, withPresentationTime: relPTS) {
+                    hasAppendedVideoFrame = true
+                    latestVideoRelativePTS = relPTS
+                }
+            }
+
+            // Interleave pre-roll audio chunks up to this video frame's PTS so 1s fMP4 segments flush smoothly
+            if hasAudio, let aIn = audioInput {
+                while audioIndex < audioChunks.count {
+                    let chunk = audioChunks[audioIndex]
+                    if !chunk.pts.isValid {
+                        audioIndex += 1
+                        continue
+                    }
+                    let aRel = CMTimeSubtract(chunk.pts, firstVideoPTS)
+                    if aRel < .zero {
+                        audioIndex += 1
+                        continue
+                    }
+                    if CMTimeCompare(aRel, relPTS) > 0 {
+                        break
+                    }
+                    audioIndex += 1
+                    if latestAudioRelativePTS.isValid && CMTimeCompare(aRel, latestAudioRelativePTS) < 0 {
+                        continue
+                    }
+                    var aSpins = 0
+                    while !aIn.isReadyForMoreMediaData && aSpins < 20 && !isFinishing {
+                        Thread.sleep(forTimeInterval: 0.001)
+                        aSpins += 1
+                    }
+                    if aIn.isReadyForMoreMediaData,
+                       let pcmSB = Self.makePCMSampleBuffer(
+                           pcmData: chunk.pcmData,
+                           sampleCount: chunk.sampleCount,
+                           startTime: aRel
+                       ) {
+                        if aIn.append(pcmSB) {
+                            let dur = CMTime(value: CMTimeValue(chunk.sampleCount), timescale: 48_000)
+                            latestAudioRelativePTS = CMTimeAdd(aRel, dur)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flush any remaining pre-roll audio chunks captured right around the trigger frame
+        if hasAudio, sessionStarted, firstVideoPTS.isValid, let aIn = audioInput {
+            while audioIndex < audioChunks.count {
+                let chunk = audioChunks[audioIndex]
+                audioIndex += 1
+                guard chunk.pts.isValid else { continue }
+                let aRel = CMTimeSubtract(chunk.pts, firstVideoPTS)
+                guard aRel >= .zero else { continue }
+                if latestAudioRelativePTS.isValid && CMTimeCompare(aRel, latestAudioRelativePTS) < 0 {
+                    continue
+                }
+                var aSpins = 0
+                while !aIn.isReadyForMoreMediaData && aSpins < 15 && !isFinishing {
+                    Thread.sleep(forTimeInterval: 0.001)
+                    aSpins += 1
+                }
+                if aIn.isReadyForMoreMediaData,
+                   let pcmSB = Self.makePCMSampleBuffer(
+                       pcmData: chunk.pcmData,
+                       sampleCount: chunk.sampleCount,
+                       startTime: aRel
+                   ) {
+                    if aIn.append(pcmSB) {
+                        let dur = CMTime(value: CMTimeValue(chunk.sampleCount), timescale: 48_000)
+                        latestAudioRelativePTS = CMTimeAdd(aRel, dur)
+                    }
+                }
+            }
+        }
+    }
+
+    private func makeStampedPixelBuffer(
+        fromPreRoll frame: PreRollVideoFrame,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor
+    ) -> CVPixelBuffer? {
+        var pooledOut: CVPixelBuffer?
+        if let pool = adaptor.pixelBufferPool {
+            CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pooledOut)
+        }
+        if pooledOut == nil {
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]
+            ]
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                self.width,
+                self.height,
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                attrs as CFDictionary,
+                &pooledOut
+            )
+        }
+        guard let dstPB = pooledOut else { return nil }
+
+        CVPixelBufferLockBaseAddress(dstPB, [])
+        defer { CVPixelBufferUnlockBaseAddress(dstPB, []) }
+
+        let dstW = CVPixelBufferGetWidthOfPlane(dstPB, 0)
+        let dstH = CVPixelBufferGetHeightOfPlane(dstPB, 0)
+        let copyW = min(frame.width, dstW)
+        let copyH = min(frame.height, dstH)
+
+        if let dY = CVPixelBufferGetBaseAddressOfPlane(dstPB, 0) {
+            let dBPR = CVPixelBufferGetBytesPerRowOfPlane(dstPB, 0)
+            if dstW > copyW || dstH > copyH {
+                memset(dY, 16, dBPR * dstH)
+            }
+            frame.yPlane.withUnsafeBytes { rawY in
+                guard let sY = rawY.baseAddress else { return }
+                for r in 0..<copyH where (r * frame.width + copyW) <= rawY.count {
+                    memcpy(dY.advanced(by: r * dBPR), sY.advanced(by: r * frame.width), copyW)
+                }
+            }
+        }
+
+        if let dUV = CVPixelBufferGetBaseAddressOfPlane(dstPB, 1) {
+            let dBPR = CVPixelBufferGetBytesPerRowOfPlane(dstPB, 1)
+            let uvCopyH = copyH >> 1
+            let uvDstH = dstH >> 1
+            let uvCopyBytes = copyW & ~1
+            let srcUVStride = frame.width & ~1
+            if dstW > copyW || uvDstH > uvCopyH {
+                memset(dUV, 128, dBPR * uvDstH)
+            }
+            frame.uvPlane.withUnsafeBytes { rawUV in
+                guard let sUV = rawUV.baseAddress else { return }
+                for r in 0..<uvCopyH where (r * srcUVStride + uvCopyBytes) <= rawUV.count {
+                    memcpy(dUV.advanced(by: r * dBPR), sUV.advanced(by: r * srcUVStride), uvCopyBytes)
+                }
+            }
+        }
+
+        timestampStamper.stampBottomLeftLocked(pixelBuffer: dstPB, date: frame.captureDate)
+        return dstPB
     }
 
     private func appendVideoOnQueue(_ sampleBuffer: CMSampleBuffer, captureDate: Date) {
@@ -684,6 +905,74 @@ final class VaultSegmentWriter: NSObject, AVAssetWriterDelegate {
             dataBuffer: block,
             formatDescription: fmt,
             sampleCount: frameCount,
+            presentationTimeStamp: startTime,
+            packetDescriptions: nil,
+            sampleBufferOut: &sampleBuf
+        )
+        return status == noErr ? sampleBuf : nil
+    }
+
+    static func makePCMSampleBuffer(pcmData: Data, sampleCount: Int, startTime: CMTime, sampleRate: Int = 48_000) -> CMSampleBuffer? {
+        guard sampleCount > 0, pcmData.count >= sampleCount * 2 else { return nil }
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Float64(sampleRate),
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+            mBytesPerPacket: 2,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+
+        var formatDesc: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDesc
+        ) == noErr, let fmt = formatDesc else {
+            return nil
+        }
+
+        let byteLen = sampleCount * 2
+        var blockBuf: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: byteLen,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: byteLen,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
+            blockBufferOut: &blockBuf
+        ) == noErr, let block = blockBuf else {
+            return nil
+        }
+
+        let copyStatus = pcmData.withUnsafeBytes { rawPtr -> OSStatus in
+            guard let base = rawPtr.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(
+                with: base,
+                blockBuffer: block,
+                offsetIntoDestination: 0,
+                dataLength: byteLen
+            )
+        }
+        guard copyStatus == noErr else { return nil }
+
+        var sampleBuf: CMSampleBuffer?
+        let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: block,
+            formatDescription: fmt,
+            sampleCount: sampleCount,
             presentationTimeStamp: startTime,
             packetDescriptions: nil,
             sampleBufferOut: &sampleBuf

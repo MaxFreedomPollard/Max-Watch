@@ -191,6 +191,15 @@ final class AppController: NSObject,
     private let audioDataOutput = AVCaptureAudioDataOutput()
 
     private static let recordAudioPrefsKey = "MaxWatch.RecordAudioEnabled"
+    private static let motionSensitivityPrefsKey = "MaxWatch.MotionSensitivityPercent"
+    private static let wakeOnSoundPrefsKey = "MaxWatch.WakeOnSoundEnabled"
+    private static let soundSensitivityPrefsKey = "MaxWatch.SoundSensitivityPercent"
+    private static let maxBrightnessLockedPrefsKey = "MaxWatch.MaxBrightnessWhenLocked"
+
+    private enum RecordingTriggerKind {
+        case motion
+        case sound
+    }
 
     private var videoDevices: [AVCaptureDevice] = []
     private var audioDevices: [AVCaptureDevice] = []
@@ -205,26 +214,40 @@ final class AppController: NSObject,
     private var isPlayerAudioMuted: Bool = false
     private var activeCameraSummary: String = "1080p HD"
 
-    // Motion Detection State (accessed on mediaSampleQueue)
+    // Motion & Sound Detection + Pre-Roll State (accessed on mediaSampleQueue)
     private var prevLumaGrid: [UInt8] = []
     private var prevMeanLuma: Double = 0.0
     private var frameCounter: UInt64 = 0
     private var consecutiveMotionHits: Int = 0
     private var armedWarmupUntil: Date = .distantPast
+    private var sampleQueueArmed: Bool = false
+    private let soundDetector = SoundDetector()
+    private var preRollVideoRing: [PreRollVideoFrame] = []
+    private var preRollAudioRing: [PreRollAudioChunk] = []
+    private let preRollSeconds: Double = 1.25
     private var activeSegmentWriter: VaultSegmentWriter?
 
     // Shared Recorder State (Main Thread)
     private var isArmed: Bool = false
     private var isRecordingClip: Bool = false
+    private var clipTriggeredByMotion: Bool = false
+    private var clipTriggeredBySound: Bool = false
     private var recordingStartedAt: Date?
     private var recordingStopDeadline: Date?
     private let minimumClipDuration: TimeInterval = 60.0
+    private var lastDiskSpaceCheckAt: Date = .distantPast
+    private var lowDiskWarningActive: Bool = false
 
-    // Sensitivity Slider (10% = Heavy Motion 10.0% delta, 100% = Ultra Sensitive 0.25% delta; default 78% -> ~1.5% delta)
+    // Motion Sensitivity Slider (10% = Heavy Motion 10.5% delta, 100% = Ultra Sensitive 0.25% delta; default 78% -> ~1.5% delta)
     private var sensitivityPercent: Double = 78.0
     private var motionThresholdPercent: Double = 1.5
     private var latestMotionPercent: Double = 0.0
     private var latestAudioDB: Float = -60.0
+
+    // Additive Wake on Sound + Default-ON Locked-Screen Max Brightness (Night Light)
+    private var isWakeOnSoundEnabled: Bool = false
+    private var soundSensitivityPercent: Double = SoundDetector.defaultSensitivityPercent // 55% -> -30 dB ("Normal Talking Voice")
+    private var isMaxBrightnessWhenLockedEnabled: Bool = true // Checked by default!
 
     // Vault Player State
     private let player = AVPlayer()
@@ -251,7 +274,11 @@ final class AppController: NSObject,
     private var statusItem: NSStatusItem?
     private var menuArmItem: NSMenuItem?
     private var menuRecordAudioItem: NSMenuItem?
+    private var menuWakeOnSoundItem: NSMenuItem?
+    private var menuMaxBrightnessLockedItem: NSMenuItem?
     private var statusMenuRecordAudioItem: NSMenuItem?
+    private var statusMenuWakeOnSoundItem: NSMenuItem?
+    private var statusMenuMaxBrightnessLockedItem: NSMenuItem?
     private var uiTimer: Timer?
 
     // Header UI
@@ -281,6 +308,12 @@ final class AppController: NSObject,
     private var cameraPopup: NSPopUpButton!
     private var micPopup: NSPopUpButton!
     private var recordAudioSegmentedControl: NSSegmentedControl!
+    private var wakeOnSoundCheckbox: NSButton!
+    private var soundSensitivitySliderView: SoundTriggerSliderView!
+    private var soundSensitivityReadoutLabel: NSTextField!
+    private var soundCheckpointPopupView: SoundCheckpointPopupView!
+    private var maxBrightnessLockedCheckbox: NSButton!
+    private var maxBrightnessHintLabel: NSTextField!
 
     // Player Stage UI
     private var lockedOverlayCard: NSView!
@@ -317,9 +350,26 @@ final class AppController: NSObject,
 
     init(customVaultDirectory: URL? = nil) {
         self.vault = VaultManager(customVaultDirectory: customVaultDirectory)
-        let savedAudioPref = UserDefaults.standard.object(forKey: Self.recordAudioPrefsKey) as? Bool ?? true
+        let defaults = UserDefaults.standard
+        let savedAudioPref = defaults.object(forKey: Self.recordAudioPrefsKey) as? Bool ?? true
+        let savedMotionSens = defaults.object(forKey: Self.motionSensitivityPrefsKey) as? Double ?? 78.0
+        let savedWakeOnSound = defaults.object(forKey: Self.wakeOnSoundPrefsKey) as? Bool ?? false
+        let savedSoundSens = defaults.object(forKey: Self.soundSensitivityPrefsKey) as? Double ?? SoundDetector.defaultSensitivityPercent
+        // Checked by default (`true`) on first launch so lock-screen night illumination works out of the box!
+        let savedMaxBrightLocked = defaults.object(forKey: Self.maxBrightnessLockedPrefsKey) as? Bool ?? true
+
+        let effectiveWakeOnSound = savedWakeOnSound && savedAudioPref
         self.isAudioRecordingEnabled = savedAudioPref
         self.sampleQueueAudioEnabled = savedAudioPref
+        self.sensitivityPercent = max(10.0, min(100.0, savedMotionSens))
+        self.isWakeOnSoundEnabled = effectiveWakeOnSound
+        self.soundSensitivityPercent = max(10.0, min(100.0, savedSoundSens))
+        self.isMaxBrightnessWhenLockedEnabled = savedMaxBrightLocked
+
+        self.sleepAndLock.maxBrightnessWhenLockedEnabled = savedMaxBrightLocked
+        self.soundDetector.setSensitivityPercent(self.soundSensitivityPercent)
+        self.soundDetector.setEnabled(effectiveWakeOnSound)
+
         super.init()
         recomputeThresholdFromSensitivity()
     }
@@ -406,11 +456,16 @@ final class AppController: NSObject,
     }
 
     private func installSignalAndLockHandlers() {
-        // Auto-lock the encrypted vault whenever the Mac screen locks, while keeping motion capture active!
+        // Auto-lock the encrypted vault whenever the Mac screen locks, while keeping motion (+ optional sound) capture active!
         sleepAndLock.onScreenLocked = { [weak self] in
             guard let self = self else { return }
             if self.vault.isUnlocked {
                 self.lockVaultImmediately(keepCurrentStageIfCamera: true)
+            }
+            // Brief acoustic grace so the physical Ctrl+Cmd+Q lock keystroke never triggers a false sound wake
+            let grace = Date().timeIntervalSinceReferenceDate + 0.70
+            self.mediaSampleQueue.async { [weak self] in
+                self?.soundDetector.applyAcousticGrace(untilTimestamp: grace)
             }
             self.updateHeaderStatusTexts()
         }
@@ -483,6 +538,15 @@ final class AppController: NSObject,
         let recAudioMenuItem = fileMenu.addItem(withTitle: "Record Microphone Audio", action: #selector(toggleRecordAudioMenuAction), keyEquivalent: "A")
         recAudioMenuItem.state = isAudioRecordingEnabled ? .on : .off
         self.menuRecordAudioItem = recAudioMenuItem
+
+        let wakeSoundMenuItem = fileMenu.addItem(withTitle: "Also Wake on Sound (Additive to Motion)", action: #selector(toggleWakeOnSoundMenuAction), keyEquivalent: "W")
+        wakeSoundMenuItem.state = isWakeOnSoundEnabled ? .on : .off
+        self.menuWakeOnSoundItem = wakeSoundMenuItem
+
+        let maxBrightMenuItem = fileMenu.addItem(withTitle: "Max Brightness When Locked (Night Light)", action: #selector(toggleMaxBrightnessLockedMenuAction), keyEquivalent: "B")
+        maxBrightMenuItem.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
+        self.menuMaxBrightnessLockedItem = maxBrightMenuItem
+
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Save & Next (to Chosen Folder)", action: #selector(saveAndNextClicked), keyEquivalent: "s")
         fileMenu.addItem(withTitle: "Choose Save & Next Folder...", action: #selector(chooseSaveFolderClicked), keyEquivalent: "S")
@@ -541,7 +605,7 @@ final class AppController: NSObject,
     private func buildStatusBarItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = MFLogoRenderer.makeStatusImage(pointSize: 18, stateDotColor: nil)
-        item.button?.toolTip = "Max Watch - Free Offline Motion Security"
+        item.button?.toolTip = "Max Watch - Free Offline Motion & Sound Security"
 
         let menu = NSMenu()
         menu.addItem(withTitle: "Open Max Watch", action: #selector(showMainWindowAction), keyEquivalent: "")
@@ -551,6 +615,13 @@ final class AppController: NSObject,
         let statusAudioItem = menu.addItem(withTitle: "Record Microphone Audio", action: #selector(toggleRecordAudioMenuAction), keyEquivalent: "")
         statusAudioItem.state = isAudioRecordingEnabled ? .on : .off
         self.statusMenuRecordAudioItem = statusAudioItem
+        let statusWakeItem = menu.addItem(withTitle: "Also Wake on Sound", action: #selector(toggleWakeOnSoundMenuAction), keyEquivalent: "")
+        statusWakeItem.state = isWakeOnSoundEnabled ? .on : .off
+        self.statusMenuWakeOnSoundItem = statusWakeItem
+        let statusBrightItem = menu.addItem(withTitle: "Max Brightness When Locked", action: #selector(toggleMaxBrightnessLockedMenuAction), keyEquivalent: "")
+        statusBrightItem.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
+        self.statusMenuMaxBrightnessLockedItem = statusBrightItem
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Play All (Password Protected)", action: #selector(playAllClicked), keyEquivalent: "")
         menu.addItem(withTitle: "Lock Video Vault", action: #selector(lockVaultAction), keyEquivalent: "")
         menu.addItem(.separator())
@@ -953,13 +1024,73 @@ final class AppController: NSObject,
         recordAudioSegmentedControl.translatesAutoresizingMaskIntoConstraints = false
         deck.addSubview(recordAudioSegmentedControl)
 
-        let footerInfo = makeLabel(
-            "Locked-Screen Ready: Press Ctrl+Cmd+Q to lock your Mac while Max Watch keeps recording. Saves every 1s against power loss & flushes cleanly on exit.",
+        // Row 4: Additive "Also Wake on Sound?" + Checkpoint Drag Slider + Live Checkpoint Readout
+        wakeOnSoundCheckbox = NSButton(
+            checkboxWithTitle: "Also Wake on Sound?",
+            target: self,
+            action: #selector(onWakeOnSoundCheckboxChanged(_:))
+        )
+        wakeOnSoundCheckbox.font = NSFont.systemFont(ofSize: 12.0, weight: .semibold)
+        wakeOnSoundCheckbox.contentTintColor = .systemOrange
+        wakeOnSoundCheckbox.state = isWakeOnSoundEnabled ? .on : .off
+        wakeOnSoundCheckbox.toolTip = "Triggers encrypted recording on room sound IN ADDITION TO (never replacing) motion detection."
+        wakeOnSoundCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        deck.addSubview(wakeOnSoundCheckbox)
+
+        soundSensitivitySliderView = SoundTriggerSliderView()
+        soundSensitivitySliderView.sensitivityPercent = soundSensitivityPercent
+        soundSensitivitySliderView.isWakeOnSoundActive = isWakeOnSoundEnabled
+        soundSensitivitySliderView.translatesAutoresizingMaskIntoConstraints = false
+        soundSensitivitySliderView.onValueChanged = { [weak self] newPct, dragging, autoEnable in
+            self?.handleSoundSliderChanged(percent: newPct, isDragging: dragging, autoEnable: autoEnable)
+        }
+        soundSensitivitySliderView.onPopupStateChanged = { [weak self] visible, displayPct, dragging in
+            self?.updateSoundCheckpointPopup(visible: visible, displayPercent: displayPct, isDragging: dragging)
+        }
+        deck.addSubview(soundSensitivitySliderView)
+
+        soundSensitivityReadoutLabel = makeLabel(
+            "",
+            size: 12.0,
+            weight: .medium,
+            color: NSColor(calibratedRed: 0.99, green: 0.78, blue: 0.32, alpha: 1.0),
+            monoDigits: true
+        )
+        deck.addSubview(soundSensitivityReadoutLabel)
+
+        // Row 5: Default-ON Max Brightness When Locked (Night Visibility Illumination)
+        maxBrightnessLockedCheckbox = NSButton(
+            checkboxWithTitle: "☀ Max Brightness When Locked",
+            target: self,
+            action: #selector(onMaxBrightnessLockedCheckboxChanged(_:))
+        )
+        maxBrightnessLockedCheckbox.font = NSFont.systemFont(ofSize: 12.0, weight: .semibold)
+        maxBrightnessLockedCheckbox.contentTintColor = .systemYellow
+        maxBrightnessLockedCheckbox.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
+        maxBrightnessLockedCheckbox.toolTip = "Default ON: When armed and your Mac screen is locked, keeps display/screensaver awake at 100% brightness so the camera can see in pitch-dark rooms at night."
+        maxBrightnessLockedCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        deck.addSubview(maxBrightnessLockedCheckbox)
+
+        maxBrightnessHintLabel = makeLabel(
+            "Default ON — keeps lock screen / screen saver at 100% brightness while armed & locked for dark-room night visibility",
             size: 11.5,
+            weight: .regular,
+            color: NSColor(calibratedWhite: 0.78, alpha: 1.0)
+        )
+        deck.addSubview(maxBrightnessHintLabel)
+
+        let footerInfo = makeLabel(
+            "Locked-Screen & Power-Cut Safe: Lock your Mac anytime (Ctrl+Cmd+Q). Motion (+ optional sound) clips include 1.2s pre-roll & encrypt every 1s.",
+            size: 11.3,
             weight: .medium,
             color: NSColor(calibratedRed: 0.96, green: 0.82, blue: 0.38, alpha: 0.95)
         )
         deck.addSubview(footerInfo)
+
+        // Floating unclipped pop-up card above the Sound Sensitivity slider
+        soundCheckpointPopupView = SoundCheckpointPopupView()
+        soundCheckpointPopupView.translatesAutoresizingMaskIntoConstraints = false
+        recorderStageView.addSubview(soundCheckpointPopupView)
 
         NSLayoutConstraint.activate([
             recorderStageView.topAnchor.constraint(equalTo: stageContainer.topAnchor),
@@ -1005,11 +1136,11 @@ final class AppController: NSObject,
             deck.leadingAnchor.constraint(equalTo: recorderStageView.leadingAnchor, constant: 14),
             deck.trailingAnchor.constraint(equalTo: recorderStageView.trailingAnchor, constant: -14),
             deck.bottomAnchor.constraint(equalTo: recorderStageView.bottomAnchor, constant: -14),
-            deck.heightAnchor.constraint(equalToConstant: 148),
+            deck.heightAnchor.constraint(equalToConstant: 196),
 
-            motionTitle.topAnchor.constraint(equalTo: deck.topAnchor, constant: 14),
+            motionTitle.topAnchor.constraint(equalTo: deck.topAnchor, constant: 12),
             motionTitle.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
-            motionTitle.widthAnchor.constraint(equalToConstant: 140),
+            motionTitle.widthAnchor.constraint(equalToConstant: 152),
 
             motionMeterView.centerYAnchor.constraint(equalTo: motionTitle.centerYAnchor),
             motionMeterView.leadingAnchor.constraint(equalTo: motionTitle.trailingAnchor, constant: 8),
@@ -1024,9 +1155,9 @@ final class AppController: NSObject,
             cameraPopup.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
             cameraPopup.widthAnchor.constraint(equalToConstant: 210),
 
-            sensTitle.topAnchor.constraint(equalTo: motionTitle.bottomAnchor, constant: 14),
+            sensTitle.topAnchor.constraint(equalTo: motionTitle.bottomAnchor, constant: 13),
             sensTitle.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
-            sensTitle.widthAnchor.constraint(equalToConstant: 140),
+            sensTitle.widthAnchor.constraint(equalToConstant: 152),
 
             sensitivitySlider.centerYAnchor.constraint(equalTo: sensTitle.centerYAnchor),
             sensitivitySlider.leadingAnchor.constraint(equalTo: sensTitle.trailingAnchor, constant: 8),
@@ -1040,9 +1171,9 @@ final class AppController: NSObject,
             micPopup.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
             micPopup.widthAnchor.constraint(equalToConstant: 210),
 
-            micTitle.topAnchor.constraint(equalTo: sensTitle.bottomAnchor, constant: 14),
+            micTitle.topAnchor.constraint(equalTo: sensTitle.bottomAnchor, constant: 13),
             micTitle.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
-            micTitle.widthAnchor.constraint(equalToConstant: 140),
+            micTitle.widthAnchor.constraint(equalToConstant: 152),
 
             audioMeterView.centerYAnchor.constraint(equalTo: micTitle.centerYAnchor),
             audioMeterView.leadingAnchor.constraint(equalTo: micTitle.trailingAnchor, constant: 8),
@@ -1057,12 +1188,38 @@ final class AppController: NSObject,
             recordAudioSegmentedControl.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
             recordAudioSegmentedControl.widthAnchor.constraint(equalToConstant: 210),
 
-            footerInfo.topAnchor.constraint(equalTo: micTitle.bottomAnchor, constant: 13),
+            wakeOnSoundCheckbox.topAnchor.constraint(equalTo: micTitle.bottomAnchor, constant: 13),
+            wakeOnSoundCheckbox.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
+            wakeOnSoundCheckbox.widthAnchor.constraint(equalToConstant: 152),
+
+            soundSensitivitySliderView.centerYAnchor.constraint(equalTo: wakeOnSoundCheckbox.centerYAnchor),
+            soundSensitivitySliderView.leadingAnchor.constraint(equalTo: wakeOnSoundCheckbox.trailingAnchor, constant: 8),
+            soundSensitivitySliderView.widthAnchor.constraint(equalToConstant: 260),
+            soundSensitivitySliderView.heightAnchor.constraint(equalToConstant: 24),
+
+            soundSensitivityReadoutLabel.centerYAnchor.constraint(equalTo: wakeOnSoundCheckbox.centerYAnchor),
+            soundSensitivityReadoutLabel.leadingAnchor.constraint(equalTo: soundSensitivitySliderView.trailingAnchor, constant: 12),
+            soundSensitivityReadoutLabel.trailingAnchor.constraint(lessThanOrEqualTo: deck.trailingAnchor, constant: -16),
+
+            maxBrightnessLockedCheckbox.topAnchor.constraint(equalTo: wakeOnSoundCheckbox.bottomAnchor, constant: 12),
+            maxBrightnessLockedCheckbox.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
+
+            maxBrightnessHintLabel.centerYAnchor.constraint(equalTo: maxBrightnessLockedCheckbox.centerYAnchor),
+            maxBrightnessHintLabel.leadingAnchor.constraint(equalTo: maxBrightnessLockedCheckbox.trailingAnchor, constant: 10),
+            maxBrightnessHintLabel.trailingAnchor.constraint(lessThanOrEqualTo: deck.trailingAnchor, constant: -16),
+
+            footerInfo.topAnchor.constraint(equalTo: maxBrightnessLockedCheckbox.bottomAnchor, constant: 10),
             footerInfo.leadingAnchor.constraint(equalTo: deck.leadingAnchor, constant: 16),
-            footerInfo.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16)
+            footerInfo.trailingAnchor.constraint(equalTo: deck.trailingAnchor, constant: -16),
+
+            soundCheckpointPopupView.leadingAnchor.constraint(equalTo: recorderStageView.leadingAnchor, constant: 14),
+            soundCheckpointPopupView.trailingAnchor.constraint(equalTo: recorderStageView.trailingAnchor, constant: -14),
+            soundCheckpointPopupView.bottomAnchor.constraint(equalTo: soundSensitivitySliderView.topAnchor, constant: -2),
+            soundCheckpointPopupView.heightAnchor.constraint(equalToConstant: 84)
         ])
 
         recomputeThresholdFromSensitivity()
+        syncWakeOnSoundAndBrightnessControlsUI()
     }
 
     private func buildPlayerStage() {
@@ -1484,10 +1641,22 @@ final class AppController: NSObject,
                     try vDev.lockForConfiguration()
                     vDev.activeFormat = fmt
                     if let range = bestRange {
-                        let fps = min(30.0, range.maxFrameRate)
-                        let dur = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
-                        vDev.activeVideoMinFrameDuration = dur
-                        vDev.activeVideoMaxFrameDuration = dur
+                        let maxFps = min(30.0, range.maxFrameRate)
+                        vDev.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(maxFps.rounded()))
+                        // Allow sensor integration down to ~1/15s in dark rooms (when supported by format)
+                        // so night/locked-screen illumination gathers up to 2x more light automatically!
+                        let lowLightMinFps = max(15.0, range.minFrameRate)
+                        if lowLightMinFps <= maxFps {
+                            vDev.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(lowLightMinFps.rounded()))
+                        } else {
+                            vDev.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(maxFps.rounded()))
+                        }
+                    }
+                    if vDev.isExposureModeSupported(.continuousAutoExposure) {
+                        vDev.exposureMode = .continuousAutoExposure
+                    }
+                    if vDev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                        vDev.whiteBalanceMode = .continuousAutoWhiteBalance
                     }
                     vDev.unlockForConfiguration()
                 } catch {}
@@ -1560,6 +1729,7 @@ final class AppController: NSObject,
                 self.latestAudioDB = -60.0
             }
             self.activeCameraSummary = "\(camName) (\(dimsStr)) • \(micName)"
+            self.syncWakeOnSoundAndBrightnessControlsUI()
             self.updateHeaderStatusTexts()
         }
     }
@@ -1580,11 +1750,56 @@ final class AppController: NSObject,
         micPopup?.isEnabled = isAudioRecordingEnabled && audioAuthorized && !audioDevices.isEmpty
         if !isAudioRecordingEnabled {
             audioMeterView?.fraction = 0.0
+            audioMeterView?.thresholdFraction = nil
             audioReadoutLabel?.stringValue = "Audio Off (Video-Only)"
         }
+        syncWakeOnSoundAndBrightnessControlsUI()
+    }
+
+    private func syncWakeOnSoundAndBrightnessControlsUI() {
+        let effectiveSoundWake = isWakeOnSoundEnabled && isAudioRecordingEnabled
+        wakeOnSoundCheckbox?.state = effectiveSoundWake ? .on : .off
+        menuWakeOnSoundItem?.state = effectiveSoundWake ? .on : .off
+        statusMenuWakeOnSoundItem?.state = effectiveSoundWake ? .on : .off
+
+        soundSensitivitySliderView?.sensitivityPercent = soundSensitivityPercent
+        soundSensitivitySliderView?.isWakeOnSoundActive = effectiveSoundWake
+
+        let cp = SoundSensitivityCheckpoint.nearest(toPercent: soundSensitivityPercent)
+        let db = SoundDetector.thresholdDB(forPercent: soundSensitivityPercent)
+        if effectiveSoundWake {
+            soundSensitivityReadoutLabel?.textColor = NSColor(calibratedRed: 0.99, green: 0.78, blue: 0.32, alpha: 1.0)
+            soundSensitivityReadoutLabel?.stringValue = String(
+                format: "%.0f%% • “%@” (%.0f dB) + Motion",
+                soundSensitivityPercent,
+                cp.title,
+                db
+            )
+            audioMeterView?.thresholdFraction = SoundDetector.meterFraction(forDB: db)
+        } else {
+            soundSensitivityReadoutLabel?.textColor = NSColor(calibratedWhite: 0.66, alpha: 1.0)
+            soundSensitivityReadoutLabel?.stringValue = String(
+                format: "Off — Motion-only (drag/check for “%@” %.0f dB)",
+                cp.title,
+                db
+            )
+            audioMeterView?.thresholdFraction = nil
+        }
+
+        maxBrightnessLockedCheckbox?.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
+        menuMaxBrightnessLockedItem?.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
+        statusMenuMaxBrightnessLockedItem?.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
     }
 
     private func setRecordAudioEnabled(_ enabled: Bool) {
+        if !enabled && isWakeOnSoundEnabled {
+            // Turning mic capture off pauses Wake on Sound so video-only mode stays strictly silent
+            isWakeOnSoundEnabled = false
+            UserDefaults.standard.set(false, forKey: Self.wakeOnSoundPrefsKey)
+            mediaSampleQueue.async { [weak self] in
+                self?.soundDetector.setEnabled(false)
+            }
+        }
         guard isAudioRecordingEnabled != enabled else {
             syncRecordAudioControlsUI()
             return
@@ -1594,7 +1809,11 @@ final class AppController: NSObject,
         syncRecordAudioControlsUI()
 
         mediaSampleQueue.async { [weak self] in
-            self?.sampleQueueAudioEnabled = enabled
+            guard let self = self else { return }
+            self.sampleQueueAudioEnabled = enabled
+            if !enabled {
+                self.clearPreRollAudioOnQueue()
+            }
         }
 
         if isRecordingClip {
@@ -1606,6 +1825,77 @@ final class AppController: NSObject,
             reapplyCurrentDeviceSelection()
         }
         updateHeaderStatusTexts()
+    }
+
+    private func setWakeOnSoundEnabled(_ enabled: Bool) {
+        if enabled && !isAudioRecordingEnabled {
+            // Enabling "Also Wake on Sound?" automatically turns Microphone Audio ON so the sound can be heard & recorded!
+            setRecordAudioEnabled(true)
+        }
+        isWakeOnSoundEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.wakeOnSoundPrefsKey)
+        let sensSnapshot = soundSensitivityPercent
+        mediaSampleQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.soundDetector.setSensitivityPercent(sensSnapshot)
+            self.soundDetector.setEnabled(enabled)
+        }
+        syncWakeOnSoundAndBrightnessControlsUI()
+        updateHeaderStatusTexts()
+    }
+
+    private func setMaxBrightnessWhenLocked(_ enabled: Bool) {
+        isMaxBrightnessWhenLockedEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.maxBrightnessLockedPrefsKey)
+        sleepAndLock.maxBrightnessWhenLockedEnabled = enabled
+        syncWakeOnSoundAndBrightnessControlsUI()
+        updateHeaderStatusTexts()
+    }
+
+    @objc private func onWakeOnSoundCheckboxChanged(_ sender: NSButton) {
+        setWakeOnSoundEnabled(sender.state == .on)
+    }
+
+    @objc private func toggleWakeOnSoundMenuAction() {
+        setWakeOnSoundEnabled(!isWakeOnSoundEnabled)
+    }
+
+    @objc private func onMaxBrightnessLockedCheckboxChanged(_ sender: NSButton) {
+        setMaxBrightnessWhenLocked(sender.state == .on)
+    }
+
+    @objc private func toggleMaxBrightnessLockedMenuAction() {
+        setMaxBrightnessWhenLocked(!isMaxBrightnessWhenLockedEnabled)
+    }
+
+    private func handleSoundSliderChanged(percent: Double, isDragging: Bool, autoEnable: Bool) {
+        soundSensitivityPercent = max(10.0, min(100.0, percent))
+        UserDefaults.standard.set(soundSensitivityPercent, forKey: Self.soundSensitivityPrefsKey)
+        if autoEnable && !isWakeOnSoundEnabled {
+            setWakeOnSoundEnabled(true)
+        } else {
+            let pctSnapshot = soundSensitivityPercent
+            mediaSampleQueue.async { [weak self] in
+                self?.soundDetector.setSensitivityPercent(pctSnapshot)
+            }
+            syncWakeOnSoundAndBrightnessControlsUI()
+        }
+    }
+
+    private func updateSoundCheckpointPopup(visible: Bool, displayPercent: Double, isDragging: Bool) {
+        guard let popup = soundCheckpointPopupView, let slider = soundSensitivitySliderView else { return }
+        if !visible {
+            popup.isHidden = true
+            return
+        }
+        let thumbInSlider = NSPoint(x: slider.thumbXInBounds(forPercent: displayPercent), y: slider.bounds.midY)
+        let thumbInPopup = popup.convert(thumbInSlider, from: slider)
+        popup.displayPercent = displayPercent
+        popup.isDragging = isDragging
+        popup.isWakeOnSoundEnabled = isWakeOnSoundEnabled && isAudioRecordingEnabled
+        popup.anchorX = thumbInPopup.x
+        popup.isHidden = false
+        popup.needsDisplay = true
     }
 
     @objc private func onRecordAudioSegmentChanged(_ sender: NSSegmentedControl) {
@@ -1634,7 +1924,20 @@ final class AppController: NSObject,
         refreshDeviceListsAndConfigureSession(preferredVideoID: camID, preferredAudioID: micID)
     }
 
-    // MARK: - Real-Time Motion Detection & Encrypted Vault Recording
+    // MARK: - Real-Time Motion + Sound Detection, 1.25s Pre-Roll & Encrypted Vault Recording
+
+    /// Smoothly lowers the per-cell luma diff threshold in dark/night rooms (`meanLuma < 50`)
+    /// from 14 down to 9 so dim silhouettes under lock-screen illumination trigger reliably.
+    static func adaptiveCellDeltaFloor(meanLuma: Double) -> Int {
+        if meanLuma >= 50.0 {
+            return 14
+        }
+        if meanLuma <= 18.0 {
+            return 9
+        }
+        let t = (meanLuma - 18.0) / 32.0
+        return 9 + Int((t * 5.0).rounded())
+    }
 
     private func recomputeThresholdFromSensitivity() {
         // Non-linear studio taper:
@@ -1668,7 +1971,77 @@ final class AppController: NSObject,
 
     @objc private func onSensitivitySliderChanged(_ sender: NSSlider) {
         sensitivityPercent = sender.doubleValue
+        UserDefaults.standard.set(sensitivityPercent, forKey: Self.motionSensitivityPrefsKey)
         recomputeThresholdFromSensitivity()
+    }
+
+    private func clearPreRollVideoOnQueue() {
+        for i in preRollVideoRing.indices {
+            preRollVideoRing[i].secureWipe()
+        }
+        preRollVideoRing.removeAll(keepingCapacity: false)
+    }
+
+    private func clearPreRollAudioOnQueue() {
+        for i in preRollAudioRing.indices {
+            preRollAudioRing[i].secureWipe()
+        }
+        preRollAudioRing.removeAll(keepingCapacity: false)
+    }
+
+    private func clearAllPreRollOnQueue() {
+        clearPreRollVideoOnQueue()
+        clearPreRollAudioOnQueue()
+    }
+
+    private func bufferPreRollVideoFrameOnQueue(pixelBuffer pb: CVPixelBuffer, pts: CMTime, captureDate: Date) {
+        guard sampleQueueArmed, activeSegmentWriter == nil, pts.isValid, CVPixelBufferGetPlaneCount(pb) >= 2 else { return }
+
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0) & ~1
+        let h = CVPixelBufferGetHeightOfPlane(pb, 0) & ~1
+        guard w >= 64, h >= 64,
+              let sY = CVPixelBufferGetBaseAddressOfPlane(pb, 0),
+              let sUV = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return }
+
+        let sYBPR = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let sUVBPR = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+
+        var tightY = Data(count: w * h)
+        tightY.withUnsafeMutableBytes { dstRaw in
+            guard let dBase = dstRaw.baseAddress else { return }
+            for r in 0..<h {
+                memcpy(dBase.advanced(by: r * w), sY.advanced(by: r * sYBPR), w)
+            }
+        }
+
+        let uvH = h >> 1
+        var tightUV = Data(count: w * uvH)
+        tightUV.withUnsafeMutableBytes { dstRaw in
+            guard let dBase = dstRaw.baseAddress else { return }
+            for r in 0..<uvH {
+                memcpy(dBase.advanced(by: r * w), sUV.advanced(by: r * sUVBPR), w)
+            }
+        }
+
+        preRollVideoRing.append(
+            PreRollVideoFrame(
+                width: w,
+                height: h,
+                yPlane: tightY,
+                uvPlane: tightUV,
+                pts: pts,
+                captureDate: captureDate
+            )
+        )
+
+        let cutoff = CMTimeSubtract(pts, CMTime(seconds: preRollSeconds, preferredTimescale: 600))
+        while preRollVideoRing.count > 40 || (preRollVideoRing.count > 2 && CMTimeCompare(preRollVideoRing[0].pts, cutoff) < 0) {
+            preRollVideoRing[0].secureWipe()
+            preRollVideoRing.removeFirst()
+        }
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
@@ -1680,8 +2053,12 @@ final class AppController: NSObject,
     }
 
     private func handleVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        let now = Date()
         if let writer = activeSegmentWriter {
-            writer.appendVideoSampleBuffer(sampleBuffer)
+            writer.appendVideoSampleBuffer(sampleBuffer, captureDate: now)
+        } else if sampleQueueArmed, let pbForRing = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            bufferPreRollVideoFrameOnQueue(pixelBuffer: pbForRing, pts: pts, captureDate: now)
         }
 
         frameCounter &+= 1
@@ -1719,11 +2096,12 @@ final class AppController: NSObject,
             let mean = Double(sum) / Double(count)
             if prevLumaGrid.count == count {
                 let globalShift = Int(((mean - prevMeanLuma) * 0.65).rounded())
+                let cellFloor = Self.adaptiveCellDeltaFloor(meanLuma: mean)
                 var changed = 0
                 for i in 0..<count {
                     let adjusted = Int(grid[i]) - globalShift
                     let diff = abs(adjusted - Int(prevLumaGrid[i]))
-                    if diff > 14 {
+                    if diff > cellFloor {
                         changed += 1
                     }
                 }
@@ -1734,7 +2112,6 @@ final class AppController: NSObject,
         }
         CVPixelBufferUnlockBaseAddress(pb, .readOnly)
 
-        let now = Date()
         let thresholdSnapshot = motionThresholdPercent
         let motionHit: Bool
         if now >= armedWarmupUntil && motionScorePercent >= thresholdSnapshot {
@@ -1749,7 +2126,7 @@ final class AppController: NSObject,
             guard let self = self, !self.isTerminatingApp else { return }
             self.latestMotionPercent = motionScorePercent
             if self.isArmed && motionHit {
-                self.handleMotionTriggeredOnMain(now: now)
+                self.handleTriggerOnMain(now: now, kind: .motion)
             }
         }
     }
@@ -1760,35 +2137,73 @@ final class AppController: NSObject,
             writer.appendAudioSampleBuffer(sampleBuffer)
         }
 
+        let now = Date()
+        let nowRef = now.timeIntervalSinceReferenceDate
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
         var db: Float = -60.0
-        if let chan = connection.audioChannels.first {
-            db = chan.averagePowerLevel
-        } else if let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
-            var len = 0
+        var soundTriggered = false
+
+        if let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
+            var totalLen = 0
             var ptr: UnsafeMutablePointer<Int8>?
-            if CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &len, dataPointerOut: &ptr) == noErr,
-               let p = ptr, len >= 2 {
-                let samples = min(512, len / 2)
-                p.withMemoryRebound(to: Int16.self, capacity: samples) { sPtr in
-                    var sqSum: Double = 0
-                    for i in 0..<samples {
-                        let v = Double(sPtr[i]) / 32768.0
-                        sqSum += v * v
+            if CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLen, dataPointerOut: &ptr) == noErr,
+               let p = ptr, totalLen >= 2 {
+                let sampleCount = totalLen / 2
+
+                // Buffer 1.25s pre-roll PCM in RAM while armed & waiting for motion or sound trigger
+                if sampleQueueArmed && activeSegmentWriter == nil && pts.isValid {
+                    let pcmCopy = Data(bytes: p, count: sampleCount * 2)
+                    preRollAudioRing.append(PreRollAudioChunk(pcmData: pcmCopy, sampleCount: sampleCount, pts: pts))
+                    let cutoff = CMTimeSubtract(pts, CMTime(seconds: preRollSeconds + 0.15, preferredTimescale: 48_000))
+                    while preRollAudioRing.count > 100 || (preRollAudioRing.count > 2 && CMTimeCompare(preRollAudioRing[0].pts, cutoff) < 0) {
+                        preRollAudioRing[0].secureWipe()
+                        preRollAudioRing.removeFirst()
                     }
-                    let rms = sqrt(sqSum / Double(max(1, samples)))
-                    db = rms > 0.00001 ? Float(20.0 * log10(rms)) : -60.0
+                }
+
+                p.withMemoryRebound(to: Int16.self, capacity: sampleCount) { sPtr in
+                    let eval = soundDetector.analyzePCM16Mono(
+                        samples: sPtr,
+                        count: sampleCount,
+                        sampleRate: 48_000,
+                        nowTimestamp: nowRef
+                    )
+                    db = eval.filteredDB
+                    soundTriggered = eval.triggered
                 }
             }
+        } else if let chan = connection.audioChannels.first {
+            db = chan.averagePowerLevel
         }
 
         DispatchQueue.main.async { [weak self] in
-            self?.latestAudioDB = max(-60.0, min(0.0, db))
+            guard let self = self, !self.isTerminatingApp else { return }
+            self.latestAudioDB = max(-60.0, min(0.0, db))
+            if self.isArmed && self.isWakeOnSoundEnabled && soundTriggered {
+                // Sound trigger is strictly additive to motion detection!
+                self.handleTriggerOnMain(now: now, kind: .sound)
+            }
         }
     }
 
-    private func handleMotionTriggeredOnMain(now: Date) {
+    private func hasSufficientVaultDiskSpace(minimumBytes: Int64 = 200 * 1024 * 1024) -> Bool {
+        if let vals = try? vault.vaultDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) {
+            if let important = vals.volumeAvailableCapacityForImportantUsage, important > 0 {
+                return important >= minimumBytes
+            }
+            if let avail = vals.volumeAvailableCapacity {
+                return Int64(avail) >= minimumBytes
+            }
+        }
+        return true
+    }
+
+    private func handleTriggerOnMain(now: Date, kind: RecordingTriggerKind) {
         let newDeadline = now.addingTimeInterval(minimumClipDuration)
         if isRecordingClip {
+            if kind == .motion { clipTriggeredByMotion = true }
+            if kind == .sound { clipTriggeredBySound = true }
             if let existing = recordingStopDeadline {
                 recordingStopDeadline = max(existing, newDeadline)
             } else {
@@ -1796,6 +2211,13 @@ final class AppController: NSObject,
             }
             return
         }
+
+        guard hasSufficientVaultDiskSpace() else {
+            lowDiskWarningActive = true
+            updateHeaderStatusTexts()
+            return
+        }
+        lowDiskWarningActive = false
 
         // Start a brand-new AES-256-GCM 1s-chunked vault recording!
         // Enforce strict locked-while-saving invariant: always locked in Live Camera mode,
@@ -1820,10 +2242,23 @@ final class AppController: NSObject,
                 hasAudio: recordWithAudio
             )
             isRecordingClip = true
+            clipTriggeredByMotion = (kind == .motion)
+            clipTriggeredBySound = (kind == .sound)
             recordingStartedAt = now
             recordingStopDeadline = newDeadline
+            sleepAndLock.setRecordingActive(true)
+
             mediaSampleQueue.async { [weak self] in
-                self?.activeSegmentWriter = segWriter
+                guard let self = self else { return }
+                let preVideo = self.preRollVideoRing
+                let preAudio = recordWithAudio ? self.preRollAudioRing : []
+                self.preRollVideoRing.removeAll(keepingCapacity: false)
+                self.preRollAudioRing.removeAll(keepingCapacity: false)
+                if !recordWithAudio {
+                    self.clearPreRollAudioOnQueue()
+                }
+                segWriter.appendPreRoll(videoFrames: preVideo, audioChunks: preAudio)
+                self.activeSegmentWriter = segWriter
             }
             refreshStatusBarIcon()
             updateHeaderStatusTexts()
@@ -1838,8 +2273,11 @@ final class AppController: NSObject,
             return
         }
         isRecordingClip = false
+        clipTriggeredByMotion = false
+        clipTriggeredBySound = false
         recordingStartedAt = nil
         recordingStopDeadline = nil
+        sleepAndLock.setRecordingActive(false)
         if !isInPlayerMode && vault.isUnlocked {
             vault.lock()
         }
@@ -1876,6 +2314,7 @@ final class AppController: NSObject,
         mediaSampleQueue.sync {
             captured = activeSegmentWriter
             activeSegmentWriter = nil
+            clearAllPreRollOnQueue()
         }
         return captured
     }
@@ -1885,6 +2324,22 @@ final class AppController: NSObject,
     @objc private func onUITimerTick() {
         let now = Date()
         hudBottomLeftTimestampLabel?.stringValue = ClipTimestampFormatter.format(now)
+        sleepAndLock.periodicMaintenanceTick(now: now)
+
+        // Periodic disk space safety check every ~5 seconds while armed or recording
+        if (isArmed || isRecordingClip) && now.timeIntervalSince(lastDiskSpaceCheckAt) >= 5.0 {
+            lastDiskSpaceCheckAt = now
+            if !hasSufficientVaultDiskSpace() {
+                lowDiskWarningActive = true
+                if isRecordingClip {
+                    stopCurrentRecordingClip()
+                }
+                updateHeaderStatusTexts()
+            } else if lowDiskWarningActive {
+                lowDiskWarningActive = false
+                updateHeaderStatusTexts()
+            }
+        }
 
         // Motion meter & readout
         let motionFrac = min(1.0, latestMotionPercent / 12.0)
@@ -1897,13 +2352,19 @@ final class AppController: NSObject,
             motionThresholdPercent
         )
 
-        // Audio meter & readout
+        // Audio meter & readout (unified [-60 dB .. 0 dB] scale with sound-wake threshold marker)
         if !isAudioRecordingEnabled {
             audioMeterView.fraction = 0.0
             audioReadoutLabel.stringValue = "Audio Off (Video-Only)"
         } else if activeAudioActive {
-            let normDB = Double(max(0.0, min(1.0, (latestAudioDB + 55.0) / 55.0)))
+            let normDB = SoundDetector.meterFraction(forDB: Double(latestAudioDB))
             audioMeterView.fraction = normDB
+            let soundThreshDB = SoundDetector.thresholdDB(forPercent: soundSensitivityPercent)
+            if isWakeOnSoundEnabled && Double(latestAudioDB) >= soundThreshDB {
+                audioMeterView.barColor = .systemOrange
+            } else {
+                audioMeterView.barColor = .systemTeal
+            }
             audioReadoutLabel.stringValue = String(format: "%.0f dB (48 kHz AAC)", latestAudioDB)
         } else {
             audioMeterView.fraction = 0.0
@@ -1918,11 +2379,20 @@ final class AppController: NSObject,
             } else if let started = recordingStartedAt {
                 let elapsed = max(0, Int(now.timeIntervalSince(started)))
                 let rem = max(0, Int((recordingStopDeadline ?? now).timeIntervalSince(now).rounded(.up)))
+                let triggerTag: String
+                if clipTriggeredByMotion && clipTriggeredBySound {
+                    triggerTag = "Motion+Sound"
+                } else if clipTriggeredBySound {
+                    triggerTag = "Sound Wake"
+                } else {
+                    triggerTag = "Motion"
+                }
                 hudRecordingBadge.superview?.isHidden = false
                 hudRecordingBadge.stringValue = String(
-                    format: "● REC %02d:%02d • Vault Locked • Holds %ds",
+                    format: "● REC %02d:%02d (%@) • Holds %ds",
                     elapsed / 60,
                     elapsed % 60,
+                    triggerTag,
                     rem
                 )
             }
@@ -1943,14 +2413,21 @@ final class AppController: NSObject,
 
     private func updateHeaderStatusTexts() {
         let lockBadge = vault.isUnlocked ? "VAULT UNLOCKED" : "VAULT LOCKED"
-        if isRecordingClip {
+        let wakeModeSummary = (isWakeOnSoundEnabled && isAudioRecordingEnabled) ? "MOTION + SOUND" : "MOTION"
+        let nightNote = isMaxBrightnessWhenLockedEnabled ? " • ☀ Locked 100% Night Light Ready" : ""
+
+        if lowDiskWarningActive {
+            statusPillLabel.stringValue = "⚠ LOW DISK SPACE (<200 MB)"
+            statusPillLabel.textColor = .systemYellow
+            hudPrimaryLabel.stringValue = "LOW DISK SPACE (<200 MB free): Free disk space or delete old vault clips to continue recording safely."
+        } else if isRecordingClip {
             statusPillLabel.stringValue = "● RECORDING • \(lockBadge)"
             statusPillLabel.textColor = .systemRed
-            hudPrimaryLabel.stringValue = "RECORDING TO LOCKED VAULT • \(activeCameraSummary) • Safe on Exit & Power Loss"
+            hudPrimaryLabel.stringValue = "RECORDING TO LOCKED VAULT (\(wakeModeSummary)) • \(activeCameraSummary) • Safe on Exit & Power Loss"
         } else if isArmed {
-            statusPillLabel.stringValue = "● ARMED • \(lockBadge) (WORKS LOCKED)"
+            statusPillLabel.stringValue = "● ARMED (\(wakeModeSummary)) • \(lockBadge)"
             statusPillLabel.textColor = .systemGreen
-            hudPrimaryLabel.stringValue = "ARMED & WATCHING (VAULT LOCKED) • \(activeCameraSummary) • Lock screen anytime (Ctrl+Cmd+Q)"
+            hudPrimaryLabel.stringValue = "ARMED (\(wakeModeSummary)) • \(activeCameraSummary)\(nightNote) • Lock screen anytime (Ctrl+Cmd+Q)"
         } else {
             statusPillLabel.stringValue = "OFFLINE • \(lockBadge)"
             statusPillLabel.textColor = .systemTeal
@@ -1969,6 +2446,11 @@ final class AppController: NSObject,
         if isArmed {
             isArmed = false
             sleepAndLock.setArmedPreventingIdleSleep(false)
+            mediaSampleQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.sampleQueueArmed = false
+                self.clearAllPreRollOnQueue()
+            }
             stopCurrentRecordingClip()
             refreshStatusBarIcon()
             updateHeaderStatusTexts()
@@ -1979,7 +2461,7 @@ final class AppController: NSObject,
         // Importantly, unlockAfterCreate is FALSE so the vault stays strictly LOCKED while monitoring & saving!
         guard vault.isInitialized else {
             presentCreatePasswordSheet(
-                reason: "Create a Vault Password first so all motion recordings are encrypted and locked against tampering while Max Watch saves.",
+                reason: "Create a Vault Password first so all motion & sound recordings are encrypted and locked against tampering while Max Watch saves.",
                 unlockAfterCreate: false
             ) { [weak self] success in
                 if success {
@@ -1997,10 +2479,19 @@ final class AppController: NSObject,
         lockVaultImmediately(keepCurrentStageIfCamera: false)
         isArmed = true
         let warmup = Date().addingTimeInterval(1.1)
+        let warmupRef = warmup.timeIntervalSinceReferenceDate
+        let wakeSoundSnapshot = isWakeOnSoundEnabled && isAudioRecordingEnabled
+        let soundSensSnapshot = soundSensitivityPercent
         mediaSampleQueue.async { [weak self] in
-            self?.prevLumaGrid.removeAll()
-            self?.consecutiveMotionHits = 0
-            self?.armedWarmupUntil = warmup
+            guard let self = self else { return }
+            self.prevLumaGrid.removeAll()
+            self.consecutiveMotionHits = 0
+            self.armedWarmupUntil = warmup
+            self.sampleQueueArmed = true
+            self.clearAllPreRollOnQueue()
+            self.soundDetector.setSensitivityPercent(soundSensSnapshot)
+            self.soundDetector.setEnabled(wakeSoundSnapshot)
+            self.soundDetector.reset(warmupUntilTimestamp: warmupRef)
         }
         sleepAndLock.setArmedPreventingIdleSleep(true)
         refreshStatusBarIcon()
@@ -2779,13 +3270,15 @@ final class AppController: NSObject,
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.icon = NSApp.applicationIconImage
-        alert.messageText = "Max Watch (v1.3.0)"
+        alert.messageText = "Max Watch (v1.4.0)"
         alert.informativeText = """
-        A free, 100% offline, encrypted motion-detection security camera & video vault for Mac and Windows - gifted to the community by Max Freedom Pollard.
+        A free, 100% offline, encrypted motion & sound security camera & video vault for Mac and Windows - gifted to the community by Max Freedom Pollard.
 
         • Zero network access (sandboxed offline at the macOS kernel level)
+        • Additive "Also Wake on Sound?" with interactive pop-up sound-level checkpoints ("Normal Talking Voice", whispers, footsteps, knocks)
+        • Default-ON Max Brightness When Locked (100% night-light illumination when armed & screen-locked in dark rooms)
+        • 1.25-second RAM Pre-Roll captures the moment right before motion or sound triggers
         • Vault stays strictly locked while arming & saving clips against room tampering
-        • Works continuously even while your Mac screen is locked
         • Unambiguous international computer-time stamp on every clip
         • One-click Audio ON / OFF switch for video-with-audio or silent video-only capture
         • AES-256-GCM encrypted vault + password-locked Play All

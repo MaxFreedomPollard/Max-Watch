@@ -1,0 +1,43 @@
+name: macOS Universal Build & 12-Stage Verification
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-universal-build-and-verify:
+    name: Build & Verify macOS Universal (arm64 + x86_64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Audit macOS Entitlements for Zero Network Capabilities
+        run: |
+          for plist in Resources/DeveloperID.entitlements Resources/MacAppStore.entitlements; do
+            echo "Auditing $plist..."
+            if grep -E "com\.apple\.security\.network\.(client|server)" "$plist"; then
+              echo "SECURITY VIOLATION: $plist contains forbidden network entitlement!" >&2
+              exit 1
+            fi
+          done
+          echo "Entitlements audit passed: 100% offline sandbox verified."
+
+      - name: Build Universal (arm64 + x86_64) App & Run 12-Stage SelfTest
+        run: |
+          chmod +x ./scripts/build_universal.sh
+          ./scripts/build_universal.sh
+
+      - name: Verify Universal Architectures (arm64 + x86_64)
+        run: |
+          ARCHS="$(lipo -archs "build/DeveloperID/Max Watch.app/Contents/MacOS/MaxWatch")"
+          echo "Built architectures: $ARCHS"
+          echo "$ARCHS" | grep -q "arm64"
+          echo "$ARCHS" | grep -q "x86_64"

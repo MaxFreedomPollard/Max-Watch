@@ -51,6 +51,9 @@ private:
         RecAudioOnSeg,
         RecAudioOffSeg,
         RecSensitivitySlider,
+        RecWakeOnSoundToggle,
+        RecSoundSensitivitySlider,
+        RecMaxBrightnessToggle,
         SidebarUnlockBtn,
         SidebarPasswordSettings,
         SidebarClipRowBase, // + index
@@ -70,6 +73,11 @@ private:
         PlayerSpeed1xSeg,
         PlayerSpeed4xSeg,
         PlayerSpeed12xSeg
+    };
+
+    enum class TriggerKind {
+        Motion,
+        Sound
     };
 
     enum class ButtonStyle {
@@ -122,6 +130,15 @@ private:
         bool enabled = true,
         float fontSize = 12.2f
     );
+    void drawCheckboxRow(
+        ID2D1RenderTarget* rt,
+        int hitId,
+        D2D1_RECT_F rect,
+        bool checked,
+        const std::wstring& label,
+        D2D1_COLOR_F accentColor,
+        bool enabled = true
+    );
     void drawMeterBar(
         ID2D1RenderTarget* rt,
         D2D1_RECT_F rect,
@@ -130,6 +147,8 @@ private:
         D2D1_COLOR_F fillColor
     );
     void drawSensitivitySlider(ID2D1RenderTarget* rt, D2D1_RECT_F rect);
+    void drawSoundSensitivitySlider(ID2D1RenderTarget* rt, D2D1_RECT_F rect);
+    void drawSoundCheckpointPopup(ID2D1RenderTarget* rt, D2D1_RECT_F sliderRect, float stageLeft, float stageRight);
     void drawScrubberTimeline(ID2D1RenderTarget* rt, D2D1_RECT_F rect);
     void drawAspectFitFrame(ID2D1RenderTarget* rt, D2D1_RECT_F bounds, const BgraFrame& frame, bool isPlayer);
     void drawTextLine(
@@ -158,10 +177,14 @@ private:
     void refreshVaultUIState();
     void toggleArmedAction();
     void setRecordAudioEnabled(bool enabled);
+    void setWakeOnSoundEnabled(bool enabled);
+    void setMaxBrightnessWhenLockedEnabled(bool enabled);
     void showCameraPopupMenu();
     void showMicPopupMenu();
     void openWindowsPrivacySettings();
     void handleMotionTriggeredOnMain();
+    void handleTriggerOnMain(TriggerKind kind);
+    bool hasSufficientVaultDiskSpace(uint64_t minimumBytes = 200ULL * 1024ULL * 1024ULL) const;
     void stopCurrentRecordingClipSynchronously();
     void onPeriodicTimerTick();
     void runSmokeTestStep();
@@ -216,11 +239,16 @@ private:
     int selectedAudioIdx_ = 0;
 
     bool isAudioRecordingEnabled_ = true;
+    bool isWakeOnSoundEnabled_ = false; // Strictly additive to motion detection — NEVER replaces motion!
     bool needsCaptureRefreshAfterClip_ = false;
     bool isArmed_ = false;
     bool isRecordingClip_ = false;
+    bool hasMotionTriggerInActiveClip_ = false;
+    bool hasSoundTriggerInActiveClip_ = false;
+    bool lowDiskSpaceWarning_ = false;
     std::chrono::steady_clock::time_point recordingStartedSteady_{};
     std::chrono::steady_clock::time_point recordingDeadlineSteady_{};
+    std::chrono::steady_clock::time_point lastMaintenanceTickSteady_{};
     static constexpr double kMinimumClipDurationSec = 60.0;
 
     // Player & Sidebar State
@@ -239,10 +267,12 @@ private:
     int hoveredHitId_ = 0;
     int pressedHitId_ = 0;
     bool draggingSensitivity_ = false;
+    bool draggingSoundSensitivity_ = false;
     bool draggingScrubber_ = false;
     bool wasPlayingBeforeScrub_ = false;
     double scrubDragSeconds_ = 0.0;
     D2D1_RECT_F sensitivityRectDip_{};
+    D2D1_RECT_F soundSensitivityRectDip_{};
     D2D1_RECT_F scrubberRectDip_{};
     D2D1_RECT_F sidebarListRectDip_{};
     float sidebarScrollOffsetDip_ = 0.0f;

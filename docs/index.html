@@ -19,7 +19,7 @@
     "name": "Max Watch",
     "operatingSystem": "macOS 13.0+, Windows 10, Windows 11",
     "applicationCategory": "SecurityApplication",
-    "softwareVersion": "1.3.0",
+    "softwareVersion": "1.4.0",
     "license": "https://opensource.org/licenses/MIT",
     "isAccessibleForFree": true,
     "offers": {
@@ -27,14 +27,17 @@
       "price": "0",
       "priceCurrency": "USD"
     },
-    "description": "A 100% offline, free, encrypted Mac and Windows video recorder with motion detection. Records motion-activated video and audio from built-in webcams or USB cameras even while the screen is locked, storing footage in a password-protected AES-256-GCM video vault.",
+    "description": "A 100% offline, free, encrypted Mac and Windows video recorder with motion detection, additive sound-wake recording, and default-ON 100% lock-screen night illumination. Records from built-in webcams or USB cameras while the screen is locked into a password-protected AES-256-GCM video vault.",
     "downloadUrl": "https://github.com/MaxFreedomPollard/Max-Watch/releases/latest",
     "codeRepository": "https://github.com/MaxFreedomPollard/Max-Watch",
     "screenshot": [
       "https://maxfreedompollard.github.io/Max-Watch/assets/01_live_motion_studio.png"
     ],
     "featureList": [
-      "Motion detection video and audio recording with adjustable sensitivity slider",
+      "Motion detection video and audio recording with adjustable sensitivity slider and adaptive night contrast",
+      "Additive 'Also Wake on Sound?' drag slider with 5 pop-up sound-level checkpoints (never replaces motion)",
+      "Default-ON Max Brightness When Locked (100% lock-screen brightness) for pitch-dark night visibility with automatic restoration",
+      "1.25-second RAM Pre-Roll Ring Buffer (zero disk writes) capturing the moment right before motion or sound",
       "Continues recording while Mac (Ctrl+Cmd+Q) or Windows (Win+L) screen is locked",
       "Password-protected AES-256-GCM video vault that stays locked while saving",
       "1-second power-cut-safe fMP4 recording and exit-safe clip flushing",
@@ -97,9 +100,9 @@
   <div class="wrap">
     <div class="badge">macOS 13.0+ &amp; Windows 10/11 &bull; ARM64 &amp; x64 &bull; 100% Free &amp; Open Source</div>
     <h1>Max Watch</h1>
-    <p class="subtitle">A 100% offline, free, encrypted Mac &amp; Windows video recorder with motion detection.</p>
+    <p class="subtitle">A 100% offline, free, encrypted Mac &amp; Windows motion &amp; sound security camera.</p>
     <p class="lead">
-      Turn your MacBook, iMac, Windows laptop, desktop PC, or external USB webcam into a motion-activated security recorder that keeps recording even while your screen is locked. Footage is encrypted in memory into a password-protected AES-256 vault with zero cloud accounts, zero subscriptions, and zero network access.
+      Turn your MacBook, iMac, Windows laptop, desktop PC, or external USB webcam into a motion-activated (and optional sound-wake) security recorder that keeps recording while your screen is locked&mdash;illuminating dark rooms automatically at night. Footage encrypts in memory into a password-protected AES-256 vault with zero cloud accounts, zero subscriptions, and zero network access.
     </p>
     <div class="btns">
       <a class="btn btn-primary" href="https://github.com/MaxFreedomPollard/Max-Watch/releases/latest">Download for Mac &amp; Windows</a>
@@ -109,12 +112,12 @@
 
     <div class="grid">
       <div class="card">
-        <h3>Motion Detection Sliding Scale</h3>
-        <p>Dial sensitivity from subtle movement (100%) to heavy-motion-only triggers (10%) with a live motion energy meter, trigger marker, and 48 kHz AAC microphone meter.</p>
+        <h3>Motion + Additive &ldquo;Also Wake on Sound?&rdquo;</h3>
+        <p>Dial motion sensitivity (10%&ndash;100%) and optionally add sound-wake triggers (never replacing motion) via an interactive drag slider with pop-up checkpoints like &ldquo;Normal Talking Voice&rdquo; and 1.25s RAM pre-roll.</p>
       </div>
       <div class="card">
-        <h3>Records While Screen Is Locked</h3>
-        <p>Arm Max Watch and press Ctrl+Cmd+Q on Mac or Win+L on Windows to lock your computer. Motion detection and encrypted video recording continue uninterrupted in the background.</p>
+        <h3>Night Visibility When Screen Is Locked</h3>
+        <p>Arm and press Ctrl+Cmd+Q on Mac or Win+L on Windows. Max Brightness When Locked (checked by default, uncheckable anytime) keeps the lock screen at 100% brightness so cameras see clearly in pitch-dark rooms, then restores your brightness on unlock.</p>
       </div>
       <div class="card">
         <h3>Strictly Locked AES-256 Vault</h3>

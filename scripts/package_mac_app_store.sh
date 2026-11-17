@@ -7,7 +7,7 @@ ACTOOL_DIR="$BUILD_DIR/actool"
 BIN_DIR="$BUILD_DIR/bin"
 MAS_DIR="$BUILD_DIR/MacAppStore"
 MAS_APP="$MAS_DIR/Max Watch.app"
-MAS_PKG="$MAS_DIR/Max-Watch-1.3.0-MAS.pkg"
+MAS_PKG="$MAS_DIR/Max-Watch-1.4.0-MAS.pkg"
 PROFILE_PATH="/Users/max/.appstoreconnect/profiles/app_c60_maxwatch_Mac_App_Store.provisionprofile"
 
 MAS_APP_SIGN_ID="3rd Party Mac Developer Application: MAX FREEDOMMOUSSA POLLARD (9M5WZ2C3V6)"

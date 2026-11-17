@@ -1,4 +1,4 @@
-name: Windows Build & 14-Stage Verification
+name: Windows Build & 16-Stage Verification
 
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
             choco install innosetup --no-progress -y
           }
 
-      - name: Build x64 + ARM64, Run 14-Stage SelfTest, Run UI Smoke Test & Package Installer
+      - name: Build x64 + ARM64, Run 16-Stage SelfTest, Run UI Smoke Test & Package Installer
         shell: pwsh
         run: |
           ./Windows/build_windows.ps1
@@ -79,7 +79,7 @@ jobs:
           if ($machine -ne 0x8664) {
             throw ("Expected native x64 PE machine 0x8664, got 0x{0:X4}" -f $machine)
           }
-          Write-Host "Running full 14-stage --selftest from installed x64 MaxWatch.exe..."
+          Write-Host "Running full 16-stage --selftest from installed x64 MaxWatch.exe..."
           $outFile = [System.IO.Path]::GetTempFileName()
           $errFile = [System.IO.Path]::GetTempFileName()
           $stDir = Join-Path $env:RUNNER_TEMP "InstalledSelfTestTmpX64"
@@ -113,7 +113,7 @@ jobs:
           name: Max-Watch-Windows-Release-Artifacts
           path: dist_arm_test
 
-      - name: Verify Portable ARM64 14-Stage SelfTest & Direct2D UI on Real Windows 11
+      - name: Verify Portable ARM64 16-Stage SelfTest & Direct2D UI on Real Windows 11
         shell: pwsh
         run: |
           function Invoke-Win32Cli([string]$Exe, [string]$ArgStr) {
@@ -130,7 +130,7 @@ jobs:
           }
           $armPortable = Get-ChildItem -Path "dist_arm_test" -Recurse -Filter "Max-Watch-*-Windows-Portable-ARM64.exe" | Select-Object -First 1
           if (-not $armPortable) { throw "Portable ARM64 exe not found in artifact" }
-          Write-Host "Running 14-stage --selftest on real Windows 11 ARM64 ($($armPortable.FullName))..."
+          Write-Host "Running 16-stage --selftest on real Windows 11 ARM64 ($($armPortable.FullName))..."
           $stArm = Join-Path $env:RUNNER_TEMP "Win11ArmSelfTest"
           Invoke-Win32Cli $armPortable.FullName "--selftest `"$stArm`""
           Write-Host "Running Direct2D Studio UI Smoke Test on real Windows 11 ARM64..."
@@ -155,7 +155,7 @@ jobs:
           if ($machine -ne 0xAA64) {
             throw ("Expected native ARM64 PE machine 0xAA64, got 0x{0:X4}" -f $machine)
           }
-          Write-Host "Running full 14-stage --selftest from installed ARM64 MaxWatch.exe on Windows 11..."
+          Write-Host "Running full 16-stage --selftest from installed ARM64 MaxWatch.exe on Windows 11..."
           $o = [System.IO.Path]::GetTempFileName()
           $e = [System.IO.Path]::GetTempFileName()
           $stInstArm = Join-Path $env:RUNNER_TEMP "InstalledSelfTestTmpArm64"
