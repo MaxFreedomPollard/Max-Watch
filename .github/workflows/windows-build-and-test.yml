@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional GitHub Release tag (e.g. v1.4.0) to attach verified Windows .exe assets to'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -167,3 +172,48 @@ jobs:
             throw "Installed ARM64 MaxWatch.exe --selftest failed with exit code $($p.ExitCode)"
           }
           Write-Host "Real Windows 11 ARM64 Portable + Universal Installer Verification Passed 100%!"
+
+  attach-windows-release-assets:
+    name: Attach Verified Windows Binaries to GitHub Release
+    needs: [windows-build-and-verify, windows-11-arm64-client-verify]
+    if: (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download Verified Windows Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Max-Watch-Windows-Release-Artifacts
+          path: win_dist
+
+      - name: Upload Windows .exe Assets & Sync SHA-256 Checksums to Release
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "Attaching verified Windows assets to release: $TAG"
+          ls -lh win_dist/*.exe win_dist/SHA256SUMS-Windows.txt
+          gh release upload "$TAG" win_dist/*.exe --clobber -R "${{ github.repository }}"
+
+          SETUP_SHA="$(awk '/Windows-Setup\.exe/ {print $1}' win_dist/SHA256SUMS-Windows.txt | tr -d '\r')"
+          X64_SHA="$(awk '/Portable-x64\.exe/ {print $1}' win_dist/SHA256SUMS-Windows.txt | tr -d '\r')"
+          ARM64_SHA="$(awk '/Portable-ARM64\.exe/ {print $1}' win_dist/SHA256SUMS-Windows.txt | tr -d '\r')"
+          IS_DRAFT="$(gh release view "$TAG" -R "${{ github.repository }}" --json isDraft --jq .isDraft)"
+          BODY="$(gh release view "$TAG" -R "${{ github.repository }}" --json body --jq .body)"
+          if [ -n "$BODY" ] && [ -n "$SETUP_SHA" ] && [ -n "$X64_SHA" ] && [ -n "$ARM64_SHA" ]; then
+            UPDATED_BODY="$(printf '%s\n' "$BODY" | sed -E \
+              -e "s/^[0-9a-f]{64}(  Max-Watch-[0-9.]+-Windows-Setup\.exe)/${SETUP_SHA}\1/" \
+              -e "s/^[0-9a-f]{64}(  Max-Watch-[0-9.]+-Windows-Portable-x64\.exe)/${X64_SHA}\1/" \
+              -e "s/^[0-9a-f]{64}(  Max-Watch-[0-9.]+-Windows-Portable-ARM64\.exe)/${ARM64_SHA}\1/")"
+            printf '%s\n' "$UPDATED_BODY" > /tmp/updated_notes.md
+            DRAFT_FLAG=()
+            if [ "$IS_DRAFT" = "true" ]; then
+              DRAFT_FLAG=(--draft)
+            fi
+            gh release edit "$TAG" -R "${{ github.repository }}" --target main "${DRAFT_FLAG[@]}" --notes-file /tmp/updated_notes.md
+          fi
+
