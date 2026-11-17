@@ -2010,7 +2010,7 @@ final class AppController: NSObject,
         let sUVBPR = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
 
         var tightY = Data(count: w * h)
-        tightY.withUnsafeMutableBytes { dstRaw in
+        tightY.withUnsafeMutableBytes { (dstRaw: UnsafeMutableRawBufferPointer) -> Void in
             guard let dBase = dstRaw.baseAddress else { return }
             for r in 0..<h {
                 memcpy(dBase.advanced(by: r * w), sY.advanced(by: r * sYBPR), w)
@@ -2019,7 +2019,7 @@ final class AppController: NSObject,
 
         let uvH = h >> 1
         var tightUV = Data(count: w * uvH)
-        tightUV.withUnsafeMutableBytes { dstRaw in
+        tightUV.withUnsafeMutableBytes { (dstRaw: UnsafeMutableRawBufferPointer) -> Void in
             guard let dBase = dstRaw.baseAddress else { return }
             for r in 0..<uvH {
                 memcpy(dBase.advanced(by: r * w), sUV.advanced(by: r * sUVBPR), w)

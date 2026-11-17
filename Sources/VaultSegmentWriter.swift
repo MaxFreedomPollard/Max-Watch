@@ -110,41 +110,48 @@ final class FrameTimestampStamper {
         let originX = min(marginX, (dstW - stampW) & ~1)
         let originY = max(0, (dstH - marginBottom - stampH) & ~1)
 
-        stampYCbCrA.withUnsafeBufferPointer { srcBuf in
+        let w: Int = stampW
+        let h: Int = stampH
+        stampYCbCrA.withUnsafeBufferPointer { (srcBuf: UnsafeBufferPointer<UInt8>) -> Void in
             guard let src = srcBuf.baseAddress else { return }
 
             // 1. Blend Luma (Plane 0)
-            for r in 0..<stampH {
-                let yRowOff = (originY + r) * bprY + originX
-                let sRowOff = r * stampW * 4
-                for c in 0..<stampW {
-                    let sIdx = sRowOff + c * 4
-                    let sA = Int(src[sIdx + 3])
+            for r in 0..<h {
+                let yRowOff: Int = (originY + r) * bprY + originX
+                let sRowOff: Int = r * w * 4
+                for c in 0..<w {
+                    let sIdx: Int = sRowOff + c * 4
+                    let sA: Int = Int(src[sIdx + 3])
                     if sA == 0 { continue }
-                    let sY = Int(src[sIdx])
-                    let dY = Int(ptrY[yRowOff + c])
-                    ptrY[yRowOff + c] = UInt8((sY * sA + dY * (255 - sA) + 127) / 255)
+                    let invA: Int = 255 - sA
+                    let sY: Int = Int(src[sIdx])
+                    let dY: Int = Int(ptrY[yRowOff + c])
+                    let blendedY: Int = (sY * sA + dY * invA + 127) / 255
+                    ptrY[yRowOff + c] = UInt8(truncatingIfNeeded: blendedY)
                 }
             }
 
             // 2. Blend 2x2 Subsampled Chroma (Plane 1: interleaved Cb, Cr)
-            let halfH = stampH >> 1
-            let halfW = stampW >> 1
-            let uvOriginY = originY >> 1
+            let halfH: Int = h >> 1
+            let halfW: Int = w >> 1
+            let uvOriginY: Int = originY >> 1
             for r2 in 0..<halfH {
-                let uvRowOff = (uvOriginY + r2) * bprUV + originX
-                let sRowOff = (r2 * 2) * stampW * 4
+                let uvRowOff: Int = (uvOriginY + r2) * bprUV + originX
+                let sRowOff: Int = (r2 * 2) * w * 4
                 for c2 in 0..<halfW {
-                    let sIdx = sRowOff + (c2 * 2) * 4
-                    let sA = Int(src[sIdx + 3])
+                    let sIdx: Int = sRowOff + (c2 * 2) * 4
+                    let sA: Int = Int(src[sIdx + 3])
                     if sA == 0 { continue }
-                    let sCb = Int(src[sIdx + 1])
-                    let sCr = Int(src[sIdx + 2])
-                    let uvIdx = uvRowOff + c2 * 2
-                    let dCb = Int(ptrUV[uvIdx])
-                    let dCr = Int(ptrUV[uvIdx + 1])
-                    ptrUV[uvIdx] = UInt8((sCb * sA + dCb * (255 - sA) + 127) / 255)
-                    ptrUV[uvIdx + 1] = UInt8((sCr * sA + dCr * (255 - sA) + 127) / 255)
+                    let invA: Int = 255 - sA
+                    let sCb: Int = Int(src[sIdx + 1])
+                    let sCr: Int = Int(src[sIdx + 2])
+                    let uvIdx: Int = uvRowOff + c2 * 2
+                    let dCb: Int = Int(ptrUV[uvIdx])
+                    let dCr: Int = Int(ptrUV[uvIdx + 1])
+                    let blendedCb: Int = (sCb * sA + dCb * invA + 127) / 255
+                    let blendedCr: Int = (sCr * sA + dCr * invA + 127) / 255
+                    ptrUV[uvIdx] = UInt8(truncatingIfNeeded: blendedCb)
+                    ptrUV[uvIdx + 1] = UInt8(truncatingIfNeeded: blendedCr)
                 }
             }
         }
@@ -179,7 +186,7 @@ final class FrameTimestampStamper {
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let bmpInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
 
-        rgba.withUnsafeMutableBytes { rawPtr in
+        rgba.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) -> Void in
             guard let base = rawPtr.baseAddress,
                   let ctx = CGContext(
                       data: base,
@@ -563,7 +570,7 @@ final class VaultSegmentWriter: NSObject, AVAssetWriterDelegate {
             if dstW > copyW || dstH > copyH {
                 memset(dY, 16, dBPR * dstH)
             }
-            frame.yPlane.withUnsafeBytes { rawY in
+            frame.yPlane.withUnsafeBytes { (rawY: UnsafeRawBufferPointer) -> Void in
                 guard let sY = rawY.baseAddress else { return }
                 for r in 0..<copyH where (r * frame.width + copyW) <= rawY.count {
                     memcpy(dY.advanced(by: r * dBPR), sY.advanced(by: r * frame.width), copyW)
@@ -580,7 +587,7 @@ final class VaultSegmentWriter: NSObject, AVAssetWriterDelegate {
             if dstW > copyW || uvDstH > uvCopyH {
                 memset(dUV, 128, dBPR * uvDstH)
             }
-            frame.uvPlane.withUnsafeBytes { rawUV in
+            frame.uvPlane.withUnsafeBytes { (rawUV: UnsafeRawBufferPointer) -> Void in
                 guard let sUV = rawUV.baseAddress else { return }
                 for r in 0..<uvCopyH where (r * srcUVStride + uvCopyBytes) <= rawUV.count {
                     memcpy(dUV.advanced(by: r * dBPR), sUV.advanced(by: r * srcUVStride), uvCopyBytes)
