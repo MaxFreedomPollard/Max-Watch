@@ -24,8 +24,8 @@ Note: This does not disable the light that shows when the camera is recording. I
 
 Download the Apple-signed and notarized universal installer (`macOS 13.0+` Ventura, Sonoma, Sequoia, and newer on M1/M2/M3/M4 & Intel Macs) from [**GitHub Releases**](https://github.com/MaxFreedomPollard/Max-Watch/releases/latest):
 
-- [**`Max-Watch-1.3.0.dmg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.3.0/Max-Watch-1.3.0.dmg): Open the disk image and drag **Max Watch.app** into **Applications**.
-- [**`Max-Watch-1.3.0.pkg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.3.0/Max-Watch-1.3.0.pkg): Standard macOS installer package that installs directly to `/Applications/Max Watch.app`.
+- [**`Max-Watch-1.4.0.dmg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.4.0/Max-Watch-1.4.0.dmg): Open the disk image and drag **Max Watch.app** into **Applications**.
+- [**`Max-Watch-1.4.0.pkg`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.4.0/Max-Watch-1.4.0.pkg): Standard macOS installer package that installs directly to `/Applications/Max Watch.app`.
 
 Or install on macOS via **Homebrew**:
 
@@ -38,9 +38,9 @@ brew install --cask max-watch
 
 Download the Windows installer or zero-install portable `.exe` (`Windows 10` & `Windows 11` on Intel, AMD, and Snapdragon / Surface ARM64 PCs) from [**GitHub Releases**](https://github.com/MaxFreedomPollard/Max-Watch/releases/latest):
 
-- [**`Max-Watch-1.3.0-Windows-Setup.exe`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.3.0/Max-Watch-1.3.0-Windows-Setup.exe): Universal `x64 + ARM64` Windows installer (installs Start Menu & optional Desktop shortcut, no admin rights required).
-- [**`Max-Watch-1.3.0-Windows-Portable-x64.exe`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.3.0/Max-Watch-1.3.0-Windows-Portable-x64.exe): Standalone single-file portable app for Intel & AMD Windows PCs (runs immediately on download with zero installation).
-- [**`Max-Watch-1.3.0-Windows-Portable-ARM64.exe`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.3.0/Max-Watch-1.3.0-Windows-Portable-ARM64.exe): Standalone single-file portable app for ARM64 / Snapdragon Windows laptops.
+- [**`Max-Watch-1.4.0-Windows-Setup.exe`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.4.0/Max-Watch-1.4.0-Windows-Setup.exe): Universal `x64 + ARM64` Windows installer (installs Start Menu & optional Desktop shortcut, no admin rights required).
+- [**`Max-Watch-1.4.0-Windows-Portable-x64.exe`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.4.0/Max-Watch-1.4.0-Windows-Portable-x64.exe): Standalone single-file portable app for Intel & AMD Windows PCs (runs immediately on download with zero installation).
+- [**`Max-Watch-1.4.0-Windows-Portable-ARM64.exe`**](https://github.com/MaxFreedomPollard/Max-Watch/releases/download/v1.4.0/Max-Watch-1.4.0-Windows-Portable-ARM64.exe): Standalone single-file portable app for ARM64 / Snapdragon Windows laptops.
 
 ![Max Watch Live Motion Detection & Locked AES-256 Vault](./docs/assets/01_live_motion_studio.png)
 
