@@ -1058,21 +1058,30 @@ final class AppController: NSObject,
         )
         deck.addSubview(soundSensitivityReadoutLabel)
 
-        // Row 5: Default-ON Max Brightness When Locked (Night Visibility Illumination)
+        // Row 5: Default-ON Keep Screen Bright / Awake When Locked (Night Visibility)
+        #if MAC_APP_STORE
+        let lockedBrightTitle = "Keep Display Awake When Locked"
+        let lockedBrightTooltip = "Default ON: When armed and your Mac screen is locked, keeps the display awake for dark-room night visibility."
+        let lockedBrightHint = "Default ON: keeps the display awake while armed and locked for dark-room night visibility"
+        #else
+        let lockedBrightTitle = "☀ Max Brightness When Locked"
+        let lockedBrightTooltip = "Default ON: When armed and your Mac screen is locked, keeps display/screensaver awake at 100% brightness so the camera can see in pitch-dark rooms at night."
+        let lockedBrightHint = "Default ON: keeps lock screen / screen saver at 100% brightness while armed & locked for dark-room night visibility"
+        #endif
         maxBrightnessLockedCheckbox = NSButton(
-            checkboxWithTitle: "☀ Max Brightness When Locked",
+            checkboxWithTitle: lockedBrightTitle,
             target: self,
             action: #selector(onMaxBrightnessLockedCheckboxChanged(_:))
         )
         maxBrightnessLockedCheckbox.font = NSFont.systemFont(ofSize: 12.0, weight: .semibold)
         maxBrightnessLockedCheckbox.contentTintColor = .systemYellow
         maxBrightnessLockedCheckbox.state = isMaxBrightnessWhenLockedEnabled ? .on : .off
-        maxBrightnessLockedCheckbox.toolTip = "Default ON: When armed and your Mac screen is locked, keeps display/screensaver awake at 100% brightness so the camera can see in pitch-dark rooms at night."
+        maxBrightnessLockedCheckbox.toolTip = lockedBrightTooltip
         maxBrightnessLockedCheckbox.translatesAutoresizingMaskIntoConstraints = false
         deck.addSubview(maxBrightnessLockedCheckbox)
 
         maxBrightnessHintLabel = makeLabel(
-            "Default ON — keeps lock screen / screen saver at 100% brightness while armed & locked for dark-room night visibility",
+            lockedBrightHint,
             size: 11.5,
             weight: .regular,
             color: NSColor(calibratedWhite: 0.78, alpha: 1.0)

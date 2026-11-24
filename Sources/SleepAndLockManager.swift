@@ -15,6 +15,7 @@ protocol DisplayBrightnessBackend: AnyObject {
 }
 
 final class SystemDisplayBrightnessBackend: DisplayBrightnessBackend {
+    #if !MAC_APP_STORE
     private typealias GetBrightnessFn = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
     private typealias SetBrightnessFn = @convention(c) (CGDirectDisplayID, Float) -> Int32
 
@@ -51,11 +52,15 @@ final class SystemDisplayBrightnessBackend: DisplayBrightnessBackend {
         }
         return Array(ids.prefix(Int(count)))
     }
+    #else
+    init() {}
+    #endif
 
     func snapshotBrightnessByDisplay() -> [UInt32: Float] {
         var snapshot: [UInt32: Float] = [:]
 
-        // 1. Apple Silicon & modern macOS DisplayServices path
+        #if !MAC_APP_STORE
+        // 1. Apple Silicon & modern macOS DisplayServices path (Developer ID build only)
         if let getFn = dsGetBrightness {
             for id in onlineDisplayIDs() {
                 var val: Float = -1.0
@@ -64,8 +69,9 @@ final class SystemDisplayBrightnessBackend: DisplayBrightnessBackend {
                 }
             }
         }
+        #endif
 
-        // 2. Intel / IODisplayConnect fallback if DisplayServices did not report a panel
+        // 2. Public IOKit IODisplayConnect path
         if snapshot.isEmpty {
             var iterator: io_iterator_t = 0
             if IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &iterator) == kIOReturnSuccess {
@@ -92,6 +98,7 @@ final class SystemDisplayBrightnessBackend: DisplayBrightnessBackend {
         let clamped = max(0.0, min(1.0, level))
         var appliedAny = false
 
+        #if !MAC_APP_STORE
         if let setFn = dsSetBrightness {
             for id in onlineDisplayIDs() {
                 if setFn(id, clamped) == 0 {
@@ -99,8 +106,9 @@ final class SystemDisplayBrightnessBackend: DisplayBrightnessBackend {
                 }
             }
         }
+        #endif
 
-        // Always apply IODisplaySetFloatParameter as well when DisplayServices isn't handling all panels
+        // Public IOKit IODisplaySetFloatParameter path
         if !appliedAny {
             var iterator: io_iterator_t = 0
             if IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &iterator) == kIOReturnSuccess {
@@ -118,11 +126,13 @@ final class SystemDisplayBrightnessBackend: DisplayBrightnessBackend {
     func restoreBrightnessByDisplay(_ saved: [UInt32: Float]) {
         guard !saved.isEmpty else { return }
 
+        #if !MAC_APP_STORE
         if let setFn = dsSetBrightness {
             for (id, val) in saved where id < 10_000 {
                 _ = setFn(id, max(0.0, min(1.0, val)))
             }
         }
+        #endif
 
         let ioEntries = saved.filter { $0.key >= 10_000 }
         if !ioEntries.isEmpty {
